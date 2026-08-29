@@ -1,0 +1,7 @@
+build/bin/
+frontend/dist/
+frontend/node_modules/
+zavod.db
+*.log
+.DS_Store
+

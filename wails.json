@@ -1,0 +1,12 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Zavod AI",
+  "outputfilename": "zavod-ai",
+  "frontend:install": "sh ../scripts/frontend-install.sh",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "http://localhost:5173",
+  "author": {
+    "name": "oilyin"
+  }
+}
