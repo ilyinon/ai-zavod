@@ -174,25 +174,38 @@ func (c *Client) Check(ctx context.Context, modelName string) llm.ModelCheckResu
 		LastCheckedAt: now,
 	}
 
-	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	resp, err := c.Generate(checkCtx, llm.Request{
-		Model: modelName,
-		Messages: []llm.Message{
-			{Role: "system", Content: "Ответь только OK."},
-			{Role: "user", Content: "Проверка подключения."},
-		},
-		Temperature: 0,
-		MaxTokens:   8,
-	})
+	if err := c.validate(modelName); err != nil {
+		result.LastError = err.Error()
+		return result
+	}
+
+	httpReq, err := http.NewRequestWithContext(checkCtx, http.MethodGet, c.modelsURL(), nil)
+	if err != nil {
+		result.LastError = err.Error()
+		return result
+	}
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.client.Do(httpReq)
 	result.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		result.LastError = err.Error()
 		return result
 	}
-	if strings.TrimSpace(resp.Content) == "" {
-		result.LastError = "модель вернула пустой ответ"
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		result.LastError = err.Error()
+		return result
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.LastError = fmt.Sprintf("model api вернул %s: %s", resp.Status, strings.TrimSpace(string(raw)))
 		return result
 	}
 
@@ -221,6 +234,19 @@ func (c *Client) chatCompletionsURL() string {
 		return c.baseURL + "/chat/completions"
 	}
 	return c.baseURL + "/v1/chat/completions"
+}
+
+func (c *Client) modelsURL() string {
+	if strings.HasSuffix(c.baseURL, "/models") {
+		return c.baseURL
+	}
+	if strings.HasSuffix(c.baseURL, "/chat/completions") {
+		return strings.TrimSuffix(c.baseURL, "/chat/completions") + "/models"
+	}
+	if strings.HasSuffix(c.baseURL, "/v1") {
+		return c.baseURL + "/models"
+	}
+	return c.baseURL + "/v1/models"
 }
 
 func resolveAPIKey(ref string) string {

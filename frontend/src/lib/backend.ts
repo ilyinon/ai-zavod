@@ -63,6 +63,138 @@ export type WorkflowStep = {
   error: string;
 };
 
+export type Artifact = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  workflowRunId: string;
+  agentId: string;
+  kind: string;
+  title: string;
+  path: string;
+  relativePath: string;
+  createdAt: string;
+};
+
+export type ClarificationQuestion = {
+  id: string;
+  text: string;
+};
+
+export type PendingClarification = {
+  workflowRunId: string;
+  summary: string;
+  goal: string;
+  questions: ClarificationQuestion[];
+};
+
+export type ClarificationAnswer = {
+  questionId: string;
+  question: string;
+  answer: string;
+};
+
+export type BlueprintExpectedFile = {
+  path: string;
+  action: string;
+  purpose: string;
+};
+
+export type BlueprintDependencyPolicy = {
+  policy: string;
+  items: string[];
+};
+
+export type BlueprintTestCommand = {
+  command: string;
+  working_dir: string;
+  reason: string;
+};
+
+export type TaskBlueprint = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  workflowRunId: string;
+  stack: string;
+  runtime: string;
+  projectType: string;
+  scaffoldRequired: boolean;
+  entrypoints: string[];
+  expectedFiles: BlueprintExpectedFile[];
+  forbiddenFiles: string[];
+  dependencies: BlueprintDependencyPolicy;
+  testCommands: BlueprintTestCommand[];
+  openQuestions: string[];
+  confidence: string;
+  rawJson: string;
+  createdAt: string;
+};
+
+export type ProposedChange = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  workflowRunId: string;
+  agentId: string;
+  filePath: string;
+  action: string;
+  content: string;
+  reason: string;
+  status: string;
+  error: string;
+  backupPath: string;
+  beforeContent: string;
+  afterContent: string;
+  diffText: string;
+  createdAt: string;
+  appliedAt: string;
+};
+
+export type TestRun = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  workflowRunId: string;
+  command: string;
+  workingDir: string;
+  reason: string;
+  status: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  error: string;
+  startedAt: string;
+  finishedAt: string;
+  createdAt: string;
+};
+
+export type ReviewFinding = {
+  severity: string;
+  file_path: string;
+  message: string;
+  suggestion: string;
+};
+
+export type ReviewRun = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  workflowRunId: string;
+  status: string;
+  summary: string;
+  findings: ReviewFinding[];
+  requiredChanges: string[];
+  recommendedNextStep: string;
+  returnTo: string;
+  iteration: number;
+  blockingReason: string;
+  error: string;
+  startedAt: string;
+  finishedAt: string;
+  createdAt: string;
+};
+
 export type ModelConfig = {
   id: string;
   name: string;
@@ -93,6 +225,12 @@ export type ProjectState = {
   messages: Message[];
   workflowRun?: WorkflowRun;
   workflowSteps: WorkflowStep[];
+  artifacts: Artifact[];
+  blueprint?: TaskBlueprint;
+  clarification?: PendingClarification;
+  changes: ProposedChange[];
+  testRuns: TestRun[];
+  reviews: ReviewRun[];
 };
 
 export type ChatState = ProjectState & {
@@ -115,8 +253,14 @@ type WailsApp = {
   ListProjects(query: string): Promise<Project[]>;
   CreateProject(input: { name: string }): Promise<Project>;
   AddExistingProject(input: { name: string; path: string }): Promise<Project>;
+  UpdateProject(input: { projectId: string; name: string; path: string }): Promise<Project>;
+  DeleteProject(input: { projectId: string }): Promise<BootstrapState>;
   SelectProject(projectId: string): Promise<ProjectState>;
   SendMessage(input: { projectId: string; content: string }): Promise<ChatState>;
+  SubmitClarification(input: { projectId: string; workflowRunId: string; answers: ClarificationAnswer[] }): Promise<ChatState>;
+  ApplyWorkflowChanges(input: { projectId: string; workflowRunId: string }): Promise<ChatState>;
+  RunTestCommand(input: { projectId: string; testRunId: string }): Promise<ChatState>;
+  RunReview(input: { projectId: string; workflowRunId: string }): Promise<ChatState>;
   SaveModelConfig(input: ModelConfig): Promise<ModelConfig[]>;
   SetActiveModel(modelId: string): Promise<ModelConfig[]>;
   CheckModel(modelId: string): Promise<ModelConfig[]>;
@@ -148,8 +292,16 @@ export const backend = {
   listProjects: (query: string) => app().ListProjects(query),
   createProject: (name: string) => app().CreateProject({ name }),
   addExistingProject: (name: string, path: string) => app().AddExistingProject({ name, path }),
+  updateProject: (projectId: string, name: string, path: string) => app().UpdateProject({ projectId, name, path }),
+  deleteProject: (projectId: string) => app().DeleteProject({ projectId }),
   selectProject: (projectId: string) => app().SelectProject(projectId),
   sendMessage: (projectId: string, content: string) => app().SendMessage({ projectId, content }),
+  submitClarification: (projectId: string, workflowRunId: string, answers: ClarificationAnswer[]) =>
+    app().SubmitClarification({ projectId, workflowRunId, answers }),
+  applyWorkflowChanges: (projectId: string, workflowRunId: string) =>
+    app().ApplyWorkflowChanges({ projectId, workflowRunId }),
+  runTestCommand: (projectId: string, testRunId: string) => app().RunTestCommand({ projectId, testRunId }),
+  runReview: (projectId: string, workflowRunId: string) => app().RunReview({ projectId, workflowRunId }),
   saveModelConfig: (model: ModelConfig) => app().SaveModelConfig(model),
   setActiveModel: (modelId: string) => app().SetActiveModel(modelId),
   checkModel: (modelId: string) => app().CheckModel(modelId),

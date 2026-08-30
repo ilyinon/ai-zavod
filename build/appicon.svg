@@ -1,0 +1,53 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101923"/>
+      <stop offset="0.45" stop-color="#172334"/>
+      <stop offset="1" stop-color="#0E141C"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="152" y1="96" x2="872" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#78E7F3"/>
+      <stop offset="0.55" stop-color="#D0B15A"/>
+      <stop offset="1" stop-color="#E54B67"/>
+    </linearGradient>
+    <linearGradient id="zfill" x1="264" y1="228" x2="760" y2="792" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6FBFF"/>
+      <stop offset="0.5" stop-color="#CFF8FF"/>
+      <stop offset="1" stop-color="#F0C965"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="18" flood-color="#67E8F9" flood-opacity="0.35"/>
+      <feDropShadow dx="0" dy="14" stdDeviation="24" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+    <filter id="panelShadow" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="30" stdDeviation="42" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="204" fill="url(#edge)"/>
+  <rect x="96" y="96" width="832" height="832" rx="184" fill="url(#bg)" filter="url(#panelShadow)"/>
+  <rect x="136" y="136" width="752" height="752" rx="140" stroke="#A9D7E4" stroke-opacity="0.14" stroke-width="4"/>
+
+  <path d="M262 300H380L424 250H762V350H635L572 424H762V524H486L548 450H262V300Z" fill="#253145" opacity="0.96"/>
+  <path d="M262 300H380L424 250H762V350H635L572 424H762V524H486L548 450H262V300Z" stroke="#6FE7F2" stroke-opacity="0.18" stroke-width="8"/>
+
+  <path d="M264 270H766V382L458 732H768V842H258V730L567 380H264V270Z" fill="url(#zfill)" filter="url(#glow)"/>
+  <path d="M264 270H766V382L458 732H768V842H258V730L567 380H264V270Z" stroke="#FFFFFF" stroke-opacity="0.58" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M314 324H656L346 676" stroke="#122033" stroke-opacity="0.5" stroke-width="18" stroke-linecap="round"/>
+
+  <path d="M208 222H286L314 188L342 222H424L452 188L480 222H562L590 188L618 222H700L728 188L756 222H816" stroke="#D0B15A" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M208 222H816" stroke="#FFE7A3" stroke-opacity="0.35" stroke-width="4" stroke-linecap="round"/>
+
+  <path d="M768 582H834V842H768V582Z" fill="#162230" stroke="#78E7F3" stroke-opacity="0.55" stroke-width="8"/>
+  <path d="M800 582V482" stroke="#78E7F3" stroke-opacity="0.62" stroke-width="12" stroke-linecap="round"/>
+  <path d="M800 482C800 428 842 408 842 356" stroke="#78E7F3" stroke-opacity="0.32" stroke-width="22" stroke-linecap="round"/>
+
+  <circle cx="226" cy="612" r="22" fill="#68E7F3"/>
+  <circle cx="202" cy="746" r="15" fill="#E54B67"/>
+  <circle cx="826" cy="300" r="18" fill="#D0B15A"/>
+  <circle cx="716" cy="160" r="13" fill="#68E7F3"/>
+  <path d="M226 612L202 746M226 612L336 620M826 300L716 160M826 300L746 420" stroke="#68E7F3" stroke-opacity="0.35" stroke-width="8" stroke-linecap="round"/>
+
+  <text x="508" y="922" text-anchor="middle" fill="#D9F9FF" fill-opacity="0.9" font-family="Inter, SF Pro Display, Arial, sans-serif" font-size="78" font-weight="800" letter-spacing="0">ZAVOD AI</text>
+  <text x="680" y="704" fill="#122033" font-family="Inter, SF Pro Display, Arial, sans-serif" font-size="92" font-weight="900" letter-spacing="0">AI</text>
+</svg>

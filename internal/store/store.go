@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,9 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"zavod_ai/internal/artifacts"
+	"zavod_ai/internal/blueprint"
+	"zavod_ai/internal/changes"
 	"zavod_ai/internal/chat"
+	"zavod_ai/internal/checks"
 	"zavod_ai/internal/llm"
 	"zavod_ai/internal/project"
+	"zavod_ai/internal/reviews"
 	"zavod_ai/internal/workflow"
 
 	_ "modernc.org/sqlite"
@@ -126,10 +132,116 @@ func (s *Store) migrate(ctx context.Context) error {
 			error TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 		);`,
+		`CREATE TABLE IF NOT EXISTS artifacts (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			workflow_run_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			title TEXT NOT NULL,
+			path TEXT NOT NULL,
+			relative_path TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS proposed_changes (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			workflow_run_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			action TEXT NOT NULL,
+			content TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			backup_path TEXT NOT NULL DEFAULT '',
+			before_content TEXT NOT NULL DEFAULT '',
+			after_content TEXT NOT NULL DEFAULT '',
+			diff_text TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			applied_at TEXT NOT NULL DEFAULT '',
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS test_runs (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			workflow_run_id TEXT NOT NULL,
+			command TEXT NOT NULL,
+			working_dir TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			exit_code INTEGER NOT NULL DEFAULT 0,
+			stdout TEXT NOT NULL DEFAULT '',
+			stderr TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL DEFAULT '',
+			finished_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS review_runs (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			workflow_run_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			summary TEXT NOT NULL DEFAULT '',
+			findings_json TEXT NOT NULL DEFAULT '[]',
+			required_changes_json TEXT NOT NULL DEFAULT '[]',
+			recommended_next_step TEXT NOT NULL DEFAULT '',
+			return_to TEXT NOT NULL DEFAULT '',
+			iteration INTEGER NOT NULL DEFAULT 0,
+			blocking_reason TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL DEFAULT '',
+			finished_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS task_blueprints (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			workflow_run_id TEXT NOT NULL,
+			stack TEXT NOT NULL,
+			runtime TEXT NOT NULL DEFAULT '',
+			project_type TEXT NOT NULL DEFAULT '',
+			scaffold_required INTEGER NOT NULL DEFAULT 0,
+			entrypoints_json TEXT NOT NULL DEFAULT '[]',
+			expected_files_json TEXT NOT NULL DEFAULT '[]',
+			forbidden_files_json TEXT NOT NULL DEFAULT '[]',
+			dependencies_json TEXT NOT NULL DEFAULT '{}',
+			test_commands_json TEXT NOT NULL DEFAULT '[]',
+			open_questions_json TEXT NOT NULL DEFAULT '[]',
+			confidence TEXT NOT NULL DEFAULT 'medium',
+			raw_json TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_workflow_runs_task ON workflow_runs(task_id, started_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(workflow_run_id, started_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_proposed_changes_project ON proposed_changes(project_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_proposed_changes_workflow ON proposed_changes(workflow_run_id, status);`,
+		`CREATE INDEX IF NOT EXISTS idx_test_runs_workflow ON test_runs(workflow_run_id, status);`,
+		`CREATE INDEX IF NOT EXISTS idx_review_runs_workflow ON review_runs(workflow_run_id, status);`,
+		`CREATE INDEX IF NOT EXISTS idx_task_blueprints_workflow ON task_blueprints(workflow_run_id, created_at);`,
 	}
 
 	for _, statement := range statements {
@@ -150,7 +262,138 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "before_content", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "after_content", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "diff_text", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, "proposed_changes", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "return_to", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "iteration", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "blocking_reason", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, "review_runs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *Store) CreateTaskBlueprint(ctx context.Context, item blueprint.Blueprint) (blueprint.Blueprint, error) {
+	item.ID = newID("blueprint")
+	item.ProjectID = strings.TrimSpace(item.ProjectID)
+	item.TaskID = strings.TrimSpace(item.TaskID)
+	item.WorkflowRunID = strings.TrimSpace(item.WorkflowRunID)
+	item.Stack = strings.TrimSpace(item.Stack)
+	item.Runtime = strings.TrimSpace(item.Runtime)
+	item.ProjectType = strings.TrimSpace(item.ProjectType)
+	item.Confidence = strings.TrimSpace(item.Confidence)
+	item.RawJSON = strings.TrimSpace(item.RawJSON)
+	item.CreatedAt = nowString()
+	if item.Stack == "" {
+		item.Stack = blueprint.StackUnknown
+	}
+	if item.Confidence == "" {
+		item.Confidence = "medium"
+	}
+	entrypointsJSON := marshalJSON(item.Entrypoints, "[]")
+	expectedFilesJSON := marshalJSON(item.ExpectedFiles, "[]")
+	forbiddenFilesJSON := marshalJSON(item.ForbiddenFiles, "[]")
+	dependenciesJSON := marshalJSON(item.Dependencies, "{}")
+	testCommandsJSON := marshalJSON(item.TestCommands, "[]")
+	openQuestionsJSON := marshalJSON(item.OpenQuestions, "[]")
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO task_blueprints
+			(id, project_id, task_id, workflow_run_id, stack, runtime, project_type, scaffold_required,
+			 entrypoints_json, expected_files_json, forbidden_files_json, dependencies_json,
+			 test_commands_json, open_questions_json, confidence, raw_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		item.ID,
+		item.ProjectID,
+		item.TaskID,
+		item.WorkflowRunID,
+		item.Stack,
+		item.Runtime,
+		item.ProjectType,
+		boolInt(item.ScaffoldRequired),
+		entrypointsJSON,
+		expectedFilesJSON,
+		forbiddenFilesJSON,
+		dependenciesJSON,
+		testCommandsJSON,
+		openQuestionsJSON,
+		item.Confidence,
+		item.RawJSON,
+		item.CreatedAt,
+	)
+	if err != nil {
+		return blueprint.Blueprint{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) LatestTaskBlueprint(ctx context.Context, workflowRunID string) (*blueprint.Blueprint, error) {
+	var item blueprint.Blueprint
+	var scaffoldRequired int
+	var entrypointsJSON string
+	var expectedFilesJSON string
+	var forbiddenFilesJSON string
+	var dependenciesJSON string
+	var testCommandsJSON string
+	var openQuestionsJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, project_id, task_id, workflow_run_id, stack, runtime, project_type, scaffold_required,
+			entrypoints_json, expected_files_json, forbidden_files_json, dependencies_json,
+			test_commands_json, open_questions_json, confidence, raw_json, created_at
+		FROM task_blueprints
+		WHERE workflow_run_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, strings.TrimSpace(workflowRunID)).Scan(
+		&item.ID,
+		&item.ProjectID,
+		&item.TaskID,
+		&item.WorkflowRunID,
+		&item.Stack,
+		&item.Runtime,
+		&item.ProjectType,
+		&scaffoldRequired,
+		&entrypointsJSON,
+		&expectedFilesJSON,
+		&forbiddenFilesJSON,
+		&dependenciesJSON,
+		&testCommandsJSON,
+		&openQuestionsJSON,
+		&item.Confidence,
+		&item.RawJSON,
+		&item.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	item.ScaffoldRequired = scaffoldRequired != 0
+	_ = json.Unmarshal([]byte(entrypointsJSON), &item.Entrypoints)
+	_ = json.Unmarshal([]byte(expectedFilesJSON), &item.ExpectedFiles)
+	_ = json.Unmarshal([]byte(forbiddenFilesJSON), &item.ForbiddenFiles)
+	_ = json.Unmarshal([]byte(dependenciesJSON), &item.Dependencies)
+	_ = json.Unmarshal([]byte(testCommandsJSON), &item.TestCommands)
+	_ = json.Unmarshal([]byte(openQuestionsJSON), &item.OpenQuestions)
+	return &item, nil
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table string, column string, definition string) error {
@@ -247,6 +490,28 @@ func (s *Store) CreateProject(ctx context.Context, name string, path string) (pr
 		return project.Project{}, err
 	}
 	return item, nil
+}
+
+func (s *Store) UpdateProject(ctx context.Context, id string, name string, path string) (project.Project, error) {
+	name = strings.TrimSpace(name)
+	path = strings.TrimSpace(path)
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE projects
+		SET name = ?, path = ?
+		WHERE id = ?
+	`, name, path, strings.TrimSpace(id))
+	if err != nil {
+		return project.Project{}, err
+	}
+	return s.GetProject(ctx, id)
+}
+
+func (s *Store) DeleteProject(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, strings.TrimSpace(id))
+	return err
 }
 
 func (s *Store) TouchProject(ctx context.Context, id string) error {
@@ -384,7 +649,7 @@ func (s *Store) CreateWorkflowRun(ctx context.Context, taskID string) (workflow.
 
 func (s *Store) UpdateWorkflowRun(ctx context.Context, id string, status string, currentStep string, errText string) error {
 	finishedAt := ""
-	if status == workflow.StatusDone || status == workflow.StatusFailed || status == workflow.StatusWaitingUser {
+	if status == workflow.StatusDone || status == workflow.StatusFailed || status == workflow.StatusWaitingUser || status == workflow.StatusBlocked {
 		finishedAt = nowString()
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -499,6 +764,495 @@ func (s *Store) ListWorkflowSteps(ctx context.Context, workflowRunID string) ([]
 		steps = append(steps, item)
 	}
 	return steps, rows.Err()
+}
+
+func (s *Store) CreateArtifact(ctx context.Context, artifact artifacts.Artifact) (artifacts.Artifact, error) {
+	artifact.ID = newID("artifact")
+	artifact.ProjectID = strings.TrimSpace(artifact.ProjectID)
+	artifact.TaskID = strings.TrimSpace(artifact.TaskID)
+	artifact.WorkflowRunID = strings.TrimSpace(artifact.WorkflowRunID)
+	artifact.AgentID = strings.TrimSpace(artifact.AgentID)
+	artifact.Kind = strings.TrimSpace(artifact.Kind)
+	artifact.Title = strings.TrimSpace(artifact.Title)
+	artifact.Path = strings.TrimSpace(artifact.Path)
+	artifact.RelativePath = strings.TrimSpace(artifact.RelativePath)
+	artifact.CreatedAt = nowString()
+	if artifact.Title == "" {
+		artifact.Title = artifact.RelativePath
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO artifacts
+			(id, project_id, task_id, workflow_run_id, agent_id, kind, title, path, relative_path, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		artifact.ID,
+		artifact.ProjectID,
+		artifact.TaskID,
+		artifact.WorkflowRunID,
+		artifact.AgentID,
+		artifact.Kind,
+		artifact.Title,
+		artifact.Path,
+		artifact.RelativePath,
+		artifact.CreatedAt,
+	)
+	if err != nil {
+		return artifacts.Artifact{}, err
+	}
+	return artifact, nil
+}
+
+func (s *Store) ListArtifacts(ctx context.Context, projectID string, limit int) ([]artifacts.Artifact, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, task_id, workflow_run_id, agent_id, kind, title, path, relative_path, created_at
+		FROM artifacts
+		WHERE project_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []artifacts.Artifact
+	for rows.Next() {
+		var item artifacts.Artifact
+		if err := rows.Scan(
+			&item.ID,
+			&item.ProjectID,
+			&item.TaskID,
+			&item.WorkflowRunID,
+			&item.AgentID,
+			&item.Kind,
+			&item.Title,
+			&item.Path,
+			&item.RelativePath,
+			&item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) CreateProposedChange(ctx context.Context, change changes.ProposedChange) (changes.ProposedChange, error) {
+	change.ID = newID("change")
+	change.ProjectID = strings.TrimSpace(change.ProjectID)
+	change.TaskID = strings.TrimSpace(change.TaskID)
+	change.WorkflowRunID = strings.TrimSpace(change.WorkflowRunID)
+	change.AgentID = strings.TrimSpace(change.AgentID)
+	change.FilePath = strings.TrimSpace(change.FilePath)
+	change.Action = strings.TrimSpace(change.Action)
+	change.Reason = strings.TrimSpace(change.Reason)
+	change.Status = strings.TrimSpace(change.Status)
+	change.CreatedAt = nowString()
+	if change.AgentID == "" {
+		change.AgentID = "developer"
+	}
+	if change.Status == "" {
+		change.Status = changes.StatusPending
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO proposed_changes
+			(id, project_id, task_id, workflow_run_id, agent_id, file_path, action, content,
+			 reason, status, error, backup_path, before_content, after_content, diff_text, created_at, applied_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		change.ID,
+		change.ProjectID,
+		change.TaskID,
+		change.WorkflowRunID,
+		change.AgentID,
+		change.FilePath,
+		change.Action,
+		change.Content,
+		change.Reason,
+		change.Status,
+		change.Error,
+		change.BackupPath,
+		change.BeforeContent,
+		change.AfterContent,
+		change.DiffText,
+		change.CreatedAt,
+		change.AppliedAt,
+	)
+	if err != nil {
+		return changes.ProposedChange{}, err
+	}
+	return change, nil
+}
+
+func (s *Store) ListProposedChanges(ctx context.Context, projectID string, workflowRunID string, limit int) ([]changes.ProposedChange, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	args := []any{projectID}
+	sqlQuery := `
+		SELECT id, project_id, task_id, workflow_run_id, agent_id, file_path, action, content,
+			reason, status, error, backup_path, before_content, after_content, diff_text, created_at, applied_at
+		FROM proposed_changes
+		WHERE project_id = ?
+	`
+	if strings.TrimSpace(workflowRunID) != "" {
+		sqlQuery += ` AND workflow_run_id = ?`
+		args = append(args, workflowRunID)
+	}
+	sqlQuery += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanProposedChanges(rows)
+}
+
+func (s *Store) ListPendingProposedChanges(ctx context.Context, workflowRunID string) ([]changes.ProposedChange, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, task_id, workflow_run_id, agent_id, file_path, action, content,
+			reason, status, error, backup_path, before_content, after_content, diff_text, created_at, applied_at
+		FROM proposed_changes
+		WHERE workflow_run_id = ? AND status = ?
+		ORDER BY created_at ASC
+	`, workflowRunID, changes.StatusPending)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanProposedChanges(rows)
+}
+
+func (s *Store) MarkProposedChangeApplied(ctx context.Context, id string, backupPath string, beforeContent string, afterContent string, diffText string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE proposed_changes
+		SET status = ?, error = '', backup_path = ?, before_content = ?, after_content = ?, diff_text = ?, applied_at = ?
+		WHERE id = ?
+	`, changes.StatusApplied, backupPath, beforeContent, afterContent, diffText, nowString(), id)
+	return err
+}
+
+func (s *Store) MarkProposedChangeFailed(ctx context.Context, id string, errText string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE proposed_changes
+		SET status = ?, error = ?
+		WHERE id = ?
+	`, changes.StatusFailed, strings.TrimSpace(errText), id)
+	return err
+}
+
+func scanProposedChanges(rows *sql.Rows) ([]changes.ProposedChange, error) {
+	var items []changes.ProposedChange
+	for rows.Next() {
+		var item changes.ProposedChange
+		if err := rows.Scan(
+			&item.ID,
+			&item.ProjectID,
+			&item.TaskID,
+			&item.WorkflowRunID,
+			&item.AgentID,
+			&item.FilePath,
+			&item.Action,
+			&item.Content,
+			&item.Reason,
+			&item.Status,
+			&item.Error,
+			&item.BackupPath,
+			&item.BeforeContent,
+			&item.AfterContent,
+			&item.DiffText,
+			&item.CreatedAt,
+			&item.AppliedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) CreateTestRun(ctx context.Context, item checks.TestRun) (checks.TestRun, error) {
+	item.ID = newID("test")
+	item.ProjectID = strings.TrimSpace(item.ProjectID)
+	item.TaskID = strings.TrimSpace(item.TaskID)
+	item.WorkflowRunID = strings.TrimSpace(item.WorkflowRunID)
+	item.Command = strings.TrimSpace(item.Command)
+	item.WorkingDir = strings.TrimSpace(item.WorkingDir)
+	item.Reason = strings.TrimSpace(item.Reason)
+	item.Status = strings.TrimSpace(item.Status)
+	item.Error = strings.TrimSpace(item.Error)
+	item.CreatedAt = nowString()
+	if item.Status == "" {
+		item.Status = checks.StatusPending
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO test_runs
+			(id, project_id, task_id, workflow_run_id, command, working_dir, reason, status,
+			 exit_code, stdout, stderr, error, started_at, finished_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		item.ID,
+		item.ProjectID,
+		item.TaskID,
+		item.WorkflowRunID,
+		item.Command,
+		item.WorkingDir,
+		item.Reason,
+		item.Status,
+		item.ExitCode,
+		item.Stdout,
+		item.Stderr,
+		item.Error,
+		item.StartedAt,
+		item.FinishedAt,
+		item.CreatedAt,
+	)
+	if err != nil {
+		return checks.TestRun{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) ListTestRuns(ctx context.Context, projectID string, workflowRunID string, limit int) ([]checks.TestRun, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	args := []any{projectID}
+	sqlQuery := `
+		SELECT id, project_id, task_id, workflow_run_id, command, working_dir, reason, status,
+			exit_code, stdout, stderr, error, started_at, finished_at, created_at
+		FROM test_runs
+		WHERE project_id = ?
+	`
+	if strings.TrimSpace(workflowRunID) != "" {
+		sqlQuery += ` AND workflow_run_id = ?`
+		args = append(args, workflowRunID)
+	}
+	sqlQuery += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTestRuns(rows)
+}
+
+func (s *Store) GetTestRun(ctx context.Context, id string) (checks.TestRun, error) {
+	var item checks.TestRun
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, project_id, task_id, workflow_run_id, command, working_dir, reason, status,
+			exit_code, stdout, stderr, error, started_at, finished_at, created_at
+		FROM test_runs
+		WHERE id = ?
+	`, strings.TrimSpace(id)).Scan(
+		&item.ID,
+		&item.ProjectID,
+		&item.TaskID,
+		&item.WorkflowRunID,
+		&item.Command,
+		&item.WorkingDir,
+		&item.Reason,
+		&item.Status,
+		&item.ExitCode,
+		&item.Stdout,
+		&item.Stderr,
+		&item.Error,
+		&item.StartedAt,
+		&item.FinishedAt,
+		&item.CreatedAt,
+	)
+	return item, err
+}
+
+func (s *Store) MarkTestRunRunning(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE test_runs
+		SET status = ?, started_at = ?, finished_at = '', stdout = '', stderr = '', error = '', exit_code = 0
+		WHERE id = ?
+	`, checks.StatusRunning, nowString(), strings.TrimSpace(id))
+	return err
+}
+
+func (s *Store) FinishTestRun(ctx context.Context, id string, result checks.RunResult) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE test_runs
+		SET status = ?, exit_code = ?, stdout = ?, stderr = ?, error = ?, finished_at = ?
+		WHERE id = ?
+	`, result.Status, result.ExitCode, result.Stdout, result.Stderr, result.Error, nowString(), strings.TrimSpace(id))
+	return err
+}
+
+func scanTestRuns(rows *sql.Rows) ([]checks.TestRun, error) {
+	var items []checks.TestRun
+	for rows.Next() {
+		var item checks.TestRun
+		if err := rows.Scan(
+			&item.ID,
+			&item.ProjectID,
+			&item.TaskID,
+			&item.WorkflowRunID,
+			&item.Command,
+			&item.WorkingDir,
+			&item.Reason,
+			&item.Status,
+			&item.ExitCode,
+			&item.Stdout,
+			&item.Stderr,
+			&item.Error,
+			&item.StartedAt,
+			&item.FinishedAt,
+			&item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) CreateReviewRun(ctx context.Context, item reviews.ReviewRun) (reviews.ReviewRun, error) {
+	item.ID = newID("review")
+	item.ProjectID = strings.TrimSpace(item.ProjectID)
+	item.TaskID = strings.TrimSpace(item.TaskID)
+	item.WorkflowRunID = strings.TrimSpace(item.WorkflowRunID)
+	item.Status = strings.TrimSpace(item.Status)
+	item.Summary = strings.TrimSpace(item.Summary)
+	item.RecommendedNextStep = strings.TrimSpace(item.RecommendedNextStep)
+	item.ReturnTo = strings.TrimSpace(item.ReturnTo)
+	item.BlockingReason = strings.TrimSpace(item.BlockingReason)
+	item.Error = strings.TrimSpace(item.Error)
+	item.CreatedAt = nowString()
+	if item.Status == "" {
+		item.Status = reviews.StatusPending
+	}
+	if item.Status == reviews.StatusRunning && item.StartedAt == "" {
+		item.StartedAt = item.CreatedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO review_runs
+			(id, project_id, task_id, workflow_run_id, status, summary, findings_json,
+			 required_changes_json, recommended_next_step, return_to, iteration, blocking_reason,
+			 error, started_at, finished_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		item.ID,
+		item.ProjectID,
+		item.TaskID,
+		item.WorkflowRunID,
+		item.Status,
+		item.Summary,
+		reviews.FindingsToJSON(item.Findings),
+		reviews.RequiredChangesToJSON(item.RequiredChanges),
+		item.RecommendedNextStep,
+		item.ReturnTo,
+		item.Iteration,
+		item.BlockingReason,
+		item.Error,
+		item.StartedAt,
+		item.FinishedAt,
+		item.CreatedAt,
+	)
+	if err != nil {
+		return reviews.ReviewRun{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) FinishReviewRun(ctx context.Context, id string, parsed reviews.ParsedReview, errText string) error {
+	status := parsed.Status
+	if strings.TrimSpace(errText) != "" {
+		status = reviews.StatusFailed
+	}
+	if status == "" {
+		status = reviews.StatusFailed
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE review_runs
+		SET status = ?, summary = ?, findings_json = ?, required_changes_json = ?,
+			recommended_next_step = ?, return_to = ?, blocking_reason = ?, error = ?, finished_at = ?
+		WHERE id = ?
+	`,
+		status,
+		parsed.Summary,
+		reviews.FindingsToJSON(parsed.Findings),
+		reviews.RequiredChangesToJSON(parsed.RequiredChanges),
+		parsed.RecommendedNextStep,
+		parsed.ReturnTo,
+		parsed.BlockingReason,
+		strings.TrimSpace(errText),
+		nowString(),
+		strings.TrimSpace(id),
+	)
+	return err
+}
+
+func (s *Store) ListReviewRuns(ctx context.Context, projectID string, workflowRunID string, limit int) ([]reviews.ReviewRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	args := []any{projectID}
+	sqlQuery := `
+		SELECT id, project_id, task_id, workflow_run_id, status, summary, findings_json,
+			required_changes_json, recommended_next_step, return_to, iteration, blocking_reason,
+			error, started_at, finished_at, created_at
+		FROM review_runs
+		WHERE project_id = ?
+	`
+	if strings.TrimSpace(workflowRunID) != "" {
+		sqlQuery += ` AND workflow_run_id = ?`
+		args = append(args, workflowRunID)
+	}
+	sqlQuery += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanReviewRuns(rows)
+}
+
+func scanReviewRuns(rows *sql.Rows) ([]reviews.ReviewRun, error) {
+	var items []reviews.ReviewRun
+	for rows.Next() {
+		var item reviews.ReviewRun
+		var findingsJSON string
+		var requiredChangesJSON string
+		if err := rows.Scan(
+			&item.ID,
+			&item.ProjectID,
+			&item.TaskID,
+			&item.WorkflowRunID,
+			&item.Status,
+			&item.Summary,
+			&findingsJSON,
+			&requiredChangesJSON,
+			&item.RecommendedNextStep,
+			&item.ReturnTo,
+			&item.Iteration,
+			&item.BlockingReason,
+			&item.Error,
+			&item.StartedAt,
+			&item.FinishedAt,
+			&item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.Findings = reviews.FindingsFromJSON(findingsJSON)
+		item.RequiredChanges = reviews.RequiredChangesFromJSON(requiredChangesJSON)
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *Store) EnsureDefaultModels(ctx context.Context) error {
@@ -771,6 +1525,21 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, bool, error
 
 func nowString() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func marshalJSON(value any, fallback string) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fallback
+	}
+	return string(data)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func newID(prefix string) string {

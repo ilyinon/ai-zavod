@@ -57,6 +57,20 @@ func (a *App) AddExistingProject(input appsvc.AddExistingProjectInput) (appsvc.P
 	return a.service.AddExistingProject(a.ctx, input)
 }
 
+func (a *App) UpdateProject(input appsvc.UpdateProjectInput) (appsvc.ProjectDTO, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ProjectDTO{}, err
+	}
+	return a.service.UpdateProject(a.ctx, input)
+}
+
+func (a *App) DeleteProject(input appsvc.DeleteProjectInput) (appsvc.BootstrapState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.BootstrapState{}, err
+	}
+	return a.service.DeleteProject(a.ctx, input)
+}
+
 func (a *App) SelectProject(projectID string) (appsvc.ProjectState, error) {
 	if err := a.ready(); err != nil {
 		return appsvc.ProjectState{}, err
@@ -69,6 +83,34 @@ func (a *App) SendMessage(input appsvc.SendMessageInput) (appsvc.ChatState, erro
 		return appsvc.ChatState{}, err
 	}
 	return a.service.SendMessage(a.ctx, input)
+}
+
+func (a *App) SubmitClarification(input appsvc.SubmitClarificationInput) (appsvc.ChatState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ChatState{}, err
+	}
+	return a.service.SubmitClarification(a.ctx, input)
+}
+
+func (a *App) ApplyWorkflowChanges(input appsvc.ApplyWorkflowChangesInput) (appsvc.ChatState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ChatState{}, err
+	}
+	return a.service.ApplyWorkflowChanges(a.ctx, input)
+}
+
+func (a *App) RunTestCommand(input appsvc.RunTestCommandInput) (appsvc.ChatState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ChatState{}, err
+	}
+	return a.service.RunTestCommand(a.ctx, input)
+}
+
+func (a *App) RunReview(input appsvc.RunReviewInput) (appsvc.ChatState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ChatState{}, err
+	}
+	return a.service.RunReview(a.ctx, input)
 }
 
 func (a *App) SaveModelConfig(input appsvc.SaveModelConfigInput) ([]appsvc.ModelConfigDTO, error) {

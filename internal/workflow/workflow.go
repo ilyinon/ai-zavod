@@ -5,6 +5,7 @@ const (
 	StatusWaitingUser = "waiting_user"
 	StatusDone        = "done"
 	StatusFailed      = "failed"
+	StatusBlocked     = "blocked"
 
 	StepStatusQueued  = "queued"
 	StepStatusRunning = "running"
@@ -14,7 +15,12 @@ const (
 
 	StepManagerIntake       = "manager_intake"
 	StepProductRequirements = "product_requirements"
+	StepTaskBlueprint       = "task_blueprint"
 	StepArchitectPlan       = "architect_plan"
+	StepSecurityAnalysis    = "security_analysis"
+	StepDeveloperPlan       = "developer_plan"
+	StepTesterCommands      = "tester_commands"
+	StepReview              = "review"
 	StepManagerFinal        = "manager_final"
 )
 

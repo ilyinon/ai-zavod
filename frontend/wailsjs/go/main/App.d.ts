@@ -6,13 +6,21 @@ import {llm} from '../models';
 
 export function AddExistingProject(arg1:app.AddExistingProjectInput):Promise<project.Project>;
 
+export function ApplyWorkflowChanges(arg1:app.ApplyWorkflowChangesInput):Promise<app.ChatState>;
+
 export function Bootstrap():Promise<app.BootstrapState>;
 
 export function CheckModel(arg1:string):Promise<Array<llm.ModelConfig>>;
 
 export function CreateProject(arg1:app.CreateProjectInput):Promise<project.Project>;
 
+export function DeleteProject(arg1:app.DeleteProjectInput):Promise<app.BootstrapState>;
+
 export function ListProjects(arg1:string):Promise<Array<project.Project>>;
+
+export function RunReview(arg1:app.RunReviewInput):Promise<app.ChatState>;
+
+export function RunTestCommand(arg1:app.RunTestCommandInput):Promise<app.ChatState>;
 
 export function SaveModelConfig(arg1:app.SaveModelConfigInput):Promise<Array<llm.ModelConfig>>;
 
@@ -21,3 +29,7 @@ export function SelectProject(arg1:string):Promise<app.ProjectState>;
 export function SendMessage(arg1:app.SendMessageInput):Promise<app.ChatState>;
 
 export function SetActiveModel(arg1:string):Promise<Array<llm.ModelConfig>>;
+
+export function SubmitClarification(arg1:app.SubmitClarificationInput):Promise<app.ChatState>;
+
+export function UpdateProject(arg1:app.UpdateProjectInput):Promise<project.Project>;

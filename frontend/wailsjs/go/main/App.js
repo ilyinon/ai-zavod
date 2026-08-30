@@ -6,6 +6,10 @@ export function AddExistingProject(arg1) {
   return window['go']['main']['App']['AddExistingProject'](arg1);
 }
 
+export function ApplyWorkflowChanges(arg1) {
+  return window['go']['main']['App']['ApplyWorkflowChanges'](arg1);
+}
+
 export function Bootstrap() {
   return window['go']['main']['App']['Bootstrap']();
 }
@@ -18,8 +22,20 @@ export function CreateProject(arg1) {
   return window['go']['main']['App']['CreateProject'](arg1);
 }
 
+export function DeleteProject(arg1) {
+  return window['go']['main']['App']['DeleteProject'](arg1);
+}
+
 export function ListProjects(arg1) {
   return window['go']['main']['App']['ListProjects'](arg1);
+}
+
+export function RunReview(arg1) {
+  return window['go']['main']['App']['RunReview'](arg1);
+}
+
+export function RunTestCommand(arg1) {
+  return window['go']['main']['App']['RunTestCommand'](arg1);
 }
 
 export function SaveModelConfig(arg1) {
@@ -36,4 +52,12 @@ export function SendMessage(arg1) {
 
 export function SetActiveModel(arg1) {
   return window['go']['main']['App']['SetActiveModel'](arg1);
+}
+
+export function SubmitClarification(arg1) {
+  return window['go']['main']['App']['SubmitClarification'](arg1);
+}
+
+export function UpdateProject(arg1) {
+  return window['go']['main']['App']['UpdateProject'](arg1);
 }
