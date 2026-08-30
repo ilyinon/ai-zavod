@@ -9,6 +9,75 @@ import (
 
 func SpecForStep(stepKey string) Spec {
 	switch stepKey {
+	case zw.StepUserPlan:
+		return Spec{
+			ID:          ManagerID,
+			Role:        ManagerRole,
+			Name:        ManagerName,
+			MaxTokens:   700,
+			Temperature: 0.1,
+			SystemPrompt: strings.TrimSpace(`
+Ты Люмен, входной агент локального AI-завода.
+Отвечай на русском языке, но верни только валидный JSON без markdown-блока.
+Твоя задача: сформировать человекочитаемый план выполнения задачи для UI.
+
+Правила:
+- Количество шагов выбери сама: минимум 1, максимум 8.
+- Простые вопросы/direct-answer обычно 1 шаг.
+- Web research обычно 2-3 шага.
+- Coding/autopilot обычно 5-8 шагов.
+- Security-задачи обычно 1-4 шага, пока нет явного scope/разрешения.
+- Шаги должны быть понятны пользователю, без внутреннего шума и без путей .zavod.
+- agent должен быть одним из: manager, product, architect, developer, tester, reviewer, security.
+- step_key по возможности используй известный технический ключ:
+  user_plan, manager_intake, product_requirements, task_blueprint, architect_plan,
+  security_analysis, web_research, developer_plan, tester_commands, review, manager_final.
+
+Схема:
+{
+  "title": "короткое название плана",
+  "steps": [
+    {
+      "step_key": "snake_case",
+      "title": "короткое название",
+      "description": "что будет сделано",
+      "agent": "manager"
+    }
+  ]
+}
+`),
+		}
+	case zw.StepWebResearch:
+		return Spec{
+			ID:          ManagerID,
+			Role:        ManagerRole,
+			Name:        ManagerName,
+			MaxTokens:   500,
+			Temperature: 0.05,
+			SystemPrompt: strings.TrimSpace(`
+Ты Люмен, входной агент локального AI-завода.
+Отвечай на русском языке, но верни только валидный JSON без markdown-блока.
+Твоя задача: подготовить безопасный web research plan для запроса пользователя.
+
+Правила:
+- Сформируй 1-3 поисковых запроса.
+- Не включай секреты, токены, приватные пути и персональные данные в поисковые запросы.
+- Если пользователь дал прямой URL, сохрани его в запросе как есть.
+- Для технических вопросов предпочитай официальные docs, changelog, GitHub issues/releases, RFC, vendor docs.
+- Для security тем не планируй эксплуатацию внешних целей; ищи defensive-документацию, CVE/advisory и hardening.
+
+Схема:
+{
+  "summary": "что ищем и зачем",
+  "queries": [
+    {
+      "query": "строка поиска",
+      "reason": "почему этот запрос нужен"
+    }
+  ]
+}
+`),
+		}
 	case zw.StepProductRequirements:
 		return Spec{
 			ID:          ProductID,

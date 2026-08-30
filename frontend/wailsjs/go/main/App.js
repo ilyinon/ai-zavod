@@ -42,6 +42,10 @@ export function SaveModelConfig(arg1) {
   return window['go']['main']['App']['SaveModelConfig'](arg1);
 }
 
+export function SaveWebSettings(arg1) {
+  return window['go']['main']['App']['SaveWebSettings'](arg1);
+}
+
 export function SelectProject(arg1) {
   return window['go']['main']['App']['SelectProject'](arg1);
 }

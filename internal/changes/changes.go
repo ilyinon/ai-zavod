@@ -291,6 +291,7 @@ func normalizeDrafts(drafts []Draft) []Draft {
 		draft.FilePath = strings.TrimSpace(draft.FilePath)
 		draft.Action = strings.ToLower(strings.TrimSpace(draft.Action))
 		draft.Reason = strings.TrimSpace(draft.Reason)
+		draft.Content = NormalizeFileContent(draft.FilePath, draft.Content)
 		if draft.FilePath == "" || draft.Content == "" {
 			continue
 		}
@@ -303,6 +304,87 @@ func normalizeDrafts(drafts []Draft) []Draft {
 		out = append(out, draft)
 	}
 	return out
+}
+
+func NormalizeFileContent(filePath string, content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	if diffContent, ok := contentFromUnifiedDiff(filePath, content); ok {
+		content = diffContent
+	}
+	if looksDoubleEscaped(content) {
+		content = unescapeGeneratedContent(content)
+	}
+	return content
+}
+
+func looksDoubleEscaped(content string) bool {
+	escapedNewlines := strings.Count(content, `\n`)
+	if escapedNewlines < 2 {
+		return false
+	}
+	actualNewlines := strings.Count(content, "\n")
+	return actualNewlines <= 1 || escapedNewlines > actualNewlines*4
+}
+
+func unescapeGeneratedContent(content string) string {
+	replacer := strings.NewReplacer(
+		`\r\n`, "\n",
+		`\n`, "\n",
+		`\t`, "\t",
+		`\"`, `"`,
+	)
+	return replacer.Replace(content)
+}
+
+func contentFromUnifiedDiff(filePath string, content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	if len(lines) < 3 || !strings.HasPrefix(lines[0], "--- ") || !strings.HasPrefix(lines[1], "+++ ") {
+		return "", false
+	}
+	target := strings.TrimPrefix(strings.TrimSpace(lines[1]), "+++ ")
+	target = strings.TrimPrefix(target, "b/")
+	target = strings.Trim(target, `"`)
+	if filePath != "" && filepath.ToSlash(target) != filepath.ToSlash(strings.Trim(filePath, "/")) {
+		baseTarget := filepath.Base(target)
+		baseFile := filepath.Base(filePath)
+		if baseTarget != "" && baseFile != "" && baseTarget != baseFile {
+			return "", false
+		}
+	}
+
+	var builder strings.Builder
+	inHunk := false
+	changed := false
+	for _, line := range lines[2:] {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		case !inHunk:
+			continue
+		case strings.HasPrefix(line, "+++"):
+			continue
+		case strings.HasPrefix(line, "+"):
+			writeDiffPayloadLine(&builder, line[1:])
+			changed = true
+		case strings.HasPrefix(line, " "):
+			writeDiffPayloadLine(&builder, line[1:])
+		case strings.HasPrefix(line, "-"):
+			changed = true
+		case line == `\ No newline at end of file`:
+			continue
+		default:
+			writeDiffPayloadLine(&builder, line)
+		}
+	}
+	return builder.String(), changed
+}
+
+func writeDiffPayloadLine(builder *strings.Builder, value string) {
+	builder.WriteString(value)
+	if !strings.Contains(value, `\n`) && !strings.HasSuffix(value, "\n") {
+		builder.WriteString("\n")
+	}
 }
 
 func jsonCandidates(text string) []string {

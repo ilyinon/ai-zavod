@@ -3,6 +3,7 @@
 import {app} from '../models';
 import {project} from '../models';
 import {llm} from '../models';
+import {webresearch} from '../models';
 
 export function AddExistingProject(arg1:app.AddExistingProjectInput):Promise<project.Project>;
 
@@ -23,6 +24,8 @@ export function RunReview(arg1:app.RunReviewInput):Promise<app.ChatState>;
 export function RunTestCommand(arg1:app.RunTestCommandInput):Promise<app.ChatState>;
 
 export function SaveModelConfig(arg1:app.SaveModelConfigInput):Promise<Array<llm.ModelConfig>>;
+
+export function SaveWebSettings(arg1:app.SaveWebSettingsInput):Promise<webresearch.Settings>;
 
 export function SelectProject(arg1:string):Promise<app.ProjectState>;
 

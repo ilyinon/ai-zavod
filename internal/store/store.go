@@ -21,6 +21,7 @@ import (
 	"zavod_ai/internal/llm"
 	"zavod_ai/internal/project"
 	"zavod_ai/internal/reviews"
+	"zavod_ai/internal/webresearch"
 	"zavod_ai/internal/workflow"
 
 	_ "modernc.org/sqlite"
@@ -132,6 +133,34 @@ func (s *Store) migrate(ctx context.Context) error {
 			error TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 		);`,
+		`CREATE TABLE IF NOT EXISTS workflow_plans (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			workflow_run_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'running',
+			current_step_id TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS workflow_plan_steps (
+			id TEXT PRIMARY KEY,
+			plan_id TEXT NOT NULL,
+			step_key TEXT NOT NULL,
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			agent_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			started_at TEXT NOT NULL DEFAULT '',
+			finished_at TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY(plan_id) REFERENCES workflow_plans(id) ON DELETE CASCADE
+		);`,
 		`CREATE TABLE IF NOT EXISTS artifacts (
 			id TEXT PRIMARY KEY,
 			project_id TEXT NOT NULL,
@@ -232,16 +261,38 @@ func (s *Store) migrate(ctx context.Context) error {
 			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
 			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 		);`,
+		`CREATE TABLE IF NOT EXISTS web_sources (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			workflow_run_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			query TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			url TEXT NOT NULL,
+			snippet TEXT NOT NULL DEFAULT '',
+			content_excerpt TEXT NOT NULL DEFAULT '',
+			source_type TEXT NOT NULL DEFAULT '',
+			trust_level TEXT NOT NULL DEFAULT '',
+			fetched_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+			FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_workflow_runs_task ON workflow_runs(task_id, started_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(workflow_run_id, started_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_plans_run ON workflow_plans(workflow_run_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_plan_steps_plan ON workflow_plan_steps(plan_id, sort_order);`,
 		`CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_proposed_changes_project ON proposed_changes(project_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_proposed_changes_workflow ON proposed_changes(workflow_run_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_test_runs_workflow ON test_runs(workflow_run_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_review_runs_workflow ON review_runs(workflow_run_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_task_blueprints_workflow ON task_blueprints(workflow_run_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_web_sources_workflow ON web_sources(workflow_run_id, created_at);`,
 	}
 
 	for _, statement := range statements {
@@ -766,6 +817,251 @@ func (s *Store) ListWorkflowSteps(ctx context.Context, workflowRunID string) ([]
 	return steps, rows.Err()
 }
 
+func (s *Store) CreateWorkflowPlan(ctx context.Context, plan workflow.Plan, steps []workflow.PlanStep) (workflow.Plan, []workflow.PlanStep, error) {
+	plan.ID = newID("plan")
+	plan.ProjectID = strings.TrimSpace(plan.ProjectID)
+	plan.TaskID = strings.TrimSpace(plan.TaskID)
+	plan.WorkflowRunID = strings.TrimSpace(plan.WorkflowRunID)
+	plan.Title = strings.TrimSpace(plan.Title)
+	plan.Status = strings.TrimSpace(plan.Status)
+	plan.CreatedAt = nowString()
+	plan.UpdatedAt = plan.CreatedAt
+	if plan.Status == "" {
+		plan.Status = workflow.StatusRunning
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return workflow.Plan{}, nil, err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO workflow_plans
+			(id, project_id, task_id, workflow_run_id, title, status, current_step_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, plan.ID, plan.ProjectID, plan.TaskID, plan.WorkflowRunID, plan.Title, plan.Status, plan.CurrentStepID, plan.CreatedAt, plan.UpdatedAt)
+	if err != nil {
+		return workflow.Plan{}, nil, err
+	}
+
+	savedSteps := make([]workflow.PlanStep, 0, len(steps))
+	for index, step := range steps {
+		step.ID = newID("planstep")
+		step.PlanID = plan.ID
+		step.StepKey = strings.TrimSpace(step.StepKey)
+		step.Title = strings.TrimSpace(step.Title)
+		step.Description = strings.TrimSpace(step.Description)
+		step.AgentID = strings.TrimSpace(step.AgentID)
+		step.Status = strings.TrimSpace(step.Status)
+		step.Error = strings.TrimSpace(step.Error)
+		step.SortOrder = index
+		if step.StepKey == "" {
+			step.StepKey = fmt.Sprintf("step_%d", index+1)
+		}
+		if step.Title == "" {
+			step.Title = step.StepKey
+		}
+		if step.Status == "" {
+			step.Status = workflow.StepStatusQueued
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO workflow_plan_steps
+				(id, plan_id, step_key, title, description, agent_id, status, started_at, finished_at, error, sort_order)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, step.ID, step.PlanID, step.StepKey, step.Title, step.Description, step.AgentID, step.Status, step.StartedAt, step.FinishedAt, step.Error, step.SortOrder)
+		if err != nil {
+			return workflow.Plan{}, nil, err
+		}
+		savedSteps = append(savedSteps, step)
+	}
+	if err := tx.Commit(); err != nil {
+		return workflow.Plan{}, nil, err
+	}
+	return plan, savedSteps, nil
+}
+
+func (s *Store) LatestWorkflowPlan(ctx context.Context, workflowRunID string) (*workflow.Plan, []workflow.PlanStep, error) {
+	var plan workflow.Plan
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, project_id, task_id, workflow_run_id, title, status, current_step_id, created_at, updated_at
+		FROM workflow_plans
+		WHERE workflow_run_id = ?
+	`, workflowRunID).Scan(
+		&plan.ID,
+		&plan.ProjectID,
+		&plan.TaskID,
+		&plan.WorkflowRunID,
+		&plan.Title,
+		&plan.Status,
+		&plan.CurrentStepID,
+		&plan.CreatedAt,
+		&plan.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	steps, err := s.ListWorkflowPlanSteps(ctx, plan.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &plan, steps, nil
+}
+
+func (s *Store) ListWorkflowPlanSteps(ctx context.Context, planID string) ([]workflow.PlanStep, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, plan_id, step_key, title, description, agent_id, status, started_at, finished_at, error, sort_order
+		FROM workflow_plan_steps
+		WHERE plan_id = ?
+		ORDER BY sort_order ASC
+	`, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var steps []workflow.PlanStep
+	for rows.Next() {
+		var step workflow.PlanStep
+		if err := rows.Scan(
+			&step.ID,
+			&step.PlanID,
+			&step.StepKey,
+			&step.Title,
+			&step.Description,
+			&step.AgentID,
+			&step.Status,
+			&step.StartedAt,
+			&step.FinishedAt,
+			&step.Error,
+			&step.SortOrder,
+		); err != nil {
+			return nil, err
+		}
+		steps = append(steps, step)
+	}
+	return steps, rows.Err()
+}
+
+func (s *Store) StartWorkflowPlanStep(ctx context.Context, workflowRunID string, stepKey string, fallbackAgentID string) error {
+	stepKey = strings.TrimSpace(stepKey)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	plan, steps, err := workflowPlanForRunTx(ctx, tx, workflowRunID)
+	if err != nil || plan == nil || len(steps) == 0 {
+		return err
+	}
+	step := choosePlanStep(steps, stepKey, fallbackAgentID)
+	if step.ID == "" {
+		return nil
+	}
+	now := nowString()
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_plan_steps
+		SET status = ?, finished_at = CASE WHEN finished_at = '' THEN ? ELSE finished_at END
+		WHERE plan_id = ? AND status = ?
+	`, workflow.StepStatusDone, now, plan.ID, workflow.StepStatusRunning)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_plan_steps
+		SET status = ?, started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END, error = ''
+		WHERE id = ?
+	`, workflow.StepStatusRunning, now, step.ID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_plans
+		SET status = ?, current_step_id = ?, updated_at = ?
+		WHERE id = ?
+	`, workflow.StatusRunning, step.ID, now, plan.ID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) FinishWorkflowPlanStep(ctx context.Context, workflowRunID string, stepKey string, fallbackAgentID string, status string, errText string) error {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = workflow.StepStatusDone
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	plan, steps, err := workflowPlanForRunTx(ctx, tx, workflowRunID)
+	if err != nil || plan == nil || len(steps) == 0 {
+		return err
+	}
+	step := choosePlanStep(steps, stepKey, fallbackAgentID)
+	if step.ID == "" {
+		return nil
+	}
+	now := nowString()
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_plan_steps
+		SET status = ?, finished_at = ?, error = ?
+		WHERE id = ?
+	`, status, now, strings.TrimSpace(errText), step.ID)
+	if err != nil {
+		return err
+	}
+	planStatus := workflow.StatusRunning
+	if status == workflow.StepStatusFailed {
+		planStatus = workflow.StatusFailed
+	} else if status == workflow.StatusBlocked || status == workflow.StepStatusFailed {
+		planStatus = workflow.StatusBlocked
+	} else if allPlanStepsDone(steps, step.ID, status) {
+		planStatus = workflow.StatusDone
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_plans
+		SET status = ?, current_step_id = ?, updated_at = ?
+		WHERE id = ?
+	`, planStatus, step.ID, now, plan.ID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) FinishWorkflowPlan(ctx context.Context, workflowRunID string, status string, errText string) error {
+	plan, _, err := s.LatestWorkflowPlan(ctx, workflowRunID)
+	if err != nil || plan == nil {
+		return err
+	}
+	now := nowString()
+	if status == workflow.StatusDone {
+		_, err = s.db.ExecContext(ctx, `
+			UPDATE workflow_plan_steps
+			SET status = ?, finished_at = CASE WHEN finished_at = '' THEN ? ELSE finished_at END
+			WHERE plan_id = ? AND status IN (?, ?)
+		`, workflow.StepStatusDone, now, plan.ID, workflow.StepStatusQueued, workflow.StepStatusRunning)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE workflow_plans
+		SET status = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(status), now, plan.ID)
+	_ = errText
+	return err
+}
+
 func (s *Store) CreateArtifact(ctx context.Context, artifact artifacts.Artifact) (artifacts.Artifact, error) {
 	artifact.ID = newID("artifact")
 	artifact.ProjectID = strings.TrimSpace(artifact.ProjectID)
@@ -832,6 +1128,101 @@ func (s *Store) ListArtifacts(ctx context.Context, projectID string, limit int) 
 			&item.Title,
 			&item.Path,
 			&item.RelativePath,
+			&item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) CreateWebSource(ctx context.Context, source webresearch.Source) (webresearch.Source, error) {
+	source.ID = newID("websrc")
+	source.ProjectID = strings.TrimSpace(source.ProjectID)
+	source.TaskID = strings.TrimSpace(source.TaskID)
+	source.WorkflowRunID = strings.TrimSpace(source.WorkflowRunID)
+	source.AgentID = strings.TrimSpace(source.AgentID)
+	source.Query = strings.TrimSpace(source.Query)
+	source.Title = strings.TrimSpace(source.Title)
+	source.URL = strings.TrimSpace(source.URL)
+	source.Snippet = strings.TrimSpace(source.Snippet)
+	source.ContentExcerpt = strings.TrimSpace(source.ContentExcerpt)
+	source.SourceType = strings.TrimSpace(source.SourceType)
+	source.TrustLevel = strings.TrimSpace(source.TrustLevel)
+	source.FetchedAt = strings.TrimSpace(source.FetchedAt)
+	source.CreatedAt = nowString()
+	if source.AgentID == "" {
+		source.AgentID = "manager"
+	}
+	if source.SourceType == "" {
+		source.SourceType = "web"
+	}
+	if source.Title == "" {
+		source.Title = source.URL
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO web_sources
+			(id, project_id, task_id, workflow_run_id, agent_id, query, title, url, snippet,
+			 content_excerpt, source_type, trust_level, fetched_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		source.ID,
+		source.ProjectID,
+		source.TaskID,
+		source.WorkflowRunID,
+		source.AgentID,
+		source.Query,
+		source.Title,
+		source.URL,
+		source.Snippet,
+		source.ContentExcerpt,
+		source.SourceType,
+		source.TrustLevel,
+		source.FetchedAt,
+		source.CreatedAt,
+	)
+	if err != nil {
+		return webresearch.Source{}, err
+	}
+	return source, nil
+}
+
+func (s *Store) ListWebSources(ctx context.Context, projectID string, workflowRunID string, limit int) ([]webresearch.Source, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, task_id, workflow_run_id, agent_id, query, title, url, snippet,
+		       content_excerpt, source_type, trust_level, fetched_at, created_at
+		FROM web_sources
+		WHERE project_id = ? AND (? = '' OR workflow_run_id = ?)
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, projectID, workflowRunID, workflowRunID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []webresearch.Source
+	for rows.Next() {
+		var item webresearch.Source
+		if err := rows.Scan(
+			&item.ID,
+			&item.ProjectID,
+			&item.TaskID,
+			&item.WorkflowRunID,
+			&item.AgentID,
+			&item.Query,
+			&item.Title,
+			&item.URL,
+			&item.Snippet,
+			&item.ContentExcerpt,
+			&item.SourceType,
+			&item.TrustLevel,
+			&item.FetchedAt,
 			&item.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -1540,6 +1931,100 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func workflowPlanForRunTx(ctx context.Context, tx *sql.Tx, workflowRunID string) (*workflow.Plan, []workflow.PlanStep, error) {
+	var plan workflow.Plan
+	err := tx.QueryRowContext(ctx, `
+		SELECT id, project_id, task_id, workflow_run_id, title, status, current_step_id, created_at, updated_at
+		FROM workflow_plans
+		WHERE workflow_run_id = ?
+	`, workflowRunID).Scan(
+		&plan.ID,
+		&plan.ProjectID,
+		&plan.TaskID,
+		&plan.WorkflowRunID,
+		&plan.Title,
+		&plan.Status,
+		&plan.CurrentStepID,
+		&plan.CreatedAt,
+		&plan.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, plan_id, step_key, title, description, agent_id, status, started_at, finished_at, error, sort_order
+		FROM workflow_plan_steps
+		WHERE plan_id = ?
+		ORDER BY sort_order ASC
+	`, plan.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var steps []workflow.PlanStep
+	for rows.Next() {
+		var step workflow.PlanStep
+		if err := rows.Scan(
+			&step.ID,
+			&step.PlanID,
+			&step.StepKey,
+			&step.Title,
+			&step.Description,
+			&step.AgentID,
+			&step.Status,
+			&step.StartedAt,
+			&step.FinishedAt,
+			&step.Error,
+			&step.SortOrder,
+		); err != nil {
+			return nil, nil, err
+		}
+		steps = append(steps, step)
+	}
+	return &plan, steps, rows.Err()
+}
+
+func choosePlanStep(steps []workflow.PlanStep, stepKey string, fallbackAgentID string) workflow.PlanStep {
+	stepKey = strings.TrimSpace(stepKey)
+	fallbackAgentID = strings.TrimSpace(fallbackAgentID)
+	for _, step := range steps {
+		if step.StepKey == stepKey {
+			return step
+		}
+	}
+	for _, step := range steps {
+		if fallbackAgentID != "" && step.AgentID == fallbackAgentID && (step.Status == workflow.StepStatusQueued || step.Status == workflow.StepStatusRunning) {
+			return step
+		}
+	}
+	for _, step := range steps {
+		if step.Status == workflow.StepStatusQueued || step.Status == workflow.StepStatusRunning {
+			return step
+		}
+	}
+	if len(steps) > 0 {
+		return steps[len(steps)-1]
+	}
+	return workflow.PlanStep{}
+}
+
+func allPlanStepsDone(steps []workflow.PlanStep, updatedStepID string, updatedStatus string) bool {
+	for _, step := range steps {
+		status := step.Status
+		if step.ID == updatedStepID {
+			status = updatedStatus
+		}
+		if status != workflow.StepStatusDone && status != workflow.StepStatusSkipped {
+			return false
+		}
+	}
+	return true
 }
 
 func newID(prefix string) string {

@@ -1,7 +1,7 @@
 build/bin/
 frontend/dist/
 frontend/node_modules/
+.cache/
 zavod.db
 *.log
 .DS_Store
-

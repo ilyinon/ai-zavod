@@ -26,11 +26,13 @@ import (
 	"zavod_ai/internal/reviews"
 	"zavod_ai/internal/router"
 	"zavod_ai/internal/store"
+	"zavod_ai/internal/webresearch"
 	zw "zavod_ai/internal/workflow"
 )
 
 const (
 	selectedProjectSetting   = "selected_project_id"
+	webSettingsKey           = "web_research_settings"
 	managerMaxAnswerBytes    = 12 * 1024
 	managerMaxStreamEvents   = 1800
 	repetitionLoopMinRepeats = 8
@@ -62,20 +64,24 @@ type BootstrapState struct {
 	Agents            []agents.Status  `json:"agents"`
 	Models            []ModelConfigDTO `json:"models"`
 	ActiveModelID     string           `json:"activeModelId"`
+	WebSettings       WebSettingsDTO   `json:"webSettings"`
 }
 
 type ProjectState struct {
-	Project       ProjectDTO          `json:"project"`
-	Task          *TaskDTO            `json:"task,omitempty"`
-	Messages      []MessageDTO        `json:"messages"`
-	WorkflowRun   *WorkflowRunDTO     `json:"workflowRun,omitempty"`
-	WorkflowSteps []WorkflowStepDTO   `json:"workflowSteps"`
-	Artifacts     []ArtifactDTO       `json:"artifacts"`
-	Blueprint     *BlueprintDTO       `json:"blueprint,omitempty"`
-	Clarification *ClarificationDTO   `json:"clarification,omitempty"`
-	Changes       []ProposedChangeDTO `json:"changes"`
-	TestRuns      []TestRunDTO        `json:"testRuns"`
-	Reviews       []ReviewRunDTO      `json:"reviews"`
+	Project       ProjectDTO            `json:"project"`
+	Task          *TaskDTO              `json:"task,omitempty"`
+	Messages      []MessageDTO          `json:"messages"`
+	WorkflowRun   *WorkflowRunDTO       `json:"workflowRun,omitempty"`
+	WorkflowSteps []WorkflowStepDTO     `json:"workflowSteps"`
+	WorkflowPlan  *WorkflowPlanDTO      `json:"workflowPlan,omitempty"`
+	PlanSteps     []WorkflowPlanStepDTO `json:"planSteps"`
+	Artifacts     []ArtifactDTO         `json:"artifacts"`
+	Blueprint     *BlueprintDTO         `json:"blueprint,omitempty"`
+	Clarification *ClarificationDTO     `json:"clarification,omitempty"`
+	Changes       []ProposedChangeDTO   `json:"changes"`
+	TestRuns      []TestRunDTO          `json:"testRuns"`
+	Reviews       []ReviewRunDTO        `json:"reviews"`
+	WebSources    []WebSourceDTO        `json:"webSources"`
 }
 
 type ChatState struct {
@@ -174,18 +180,31 @@ type SaveModelConfigInput struct {
 	IsActive  bool   `json:"isActive"`
 }
 
+type SaveWebSettingsInput struct {
+	Enabled             bool     `json:"enabled"`
+	MaxResults          int      `json:"maxResults"`
+	MaxPagesPerWorkflow int      `json:"maxPagesPerWorkflow"`
+	TimeoutSeconds      int      `json:"timeoutSeconds"`
+	AllowedDomains      []string `json:"allowedDomains"`
+	BlockedDomains      []string `json:"blockedDomains"`
+}
+
 type ProjectDTO = project.Project
 type TaskDTO = chat.Task
 type MessageDTO = chat.Message
 type ModelConfigDTO = llm.ModelConfig
 type WorkflowRunDTO = zw.Run
 type WorkflowStepDTO = zw.Step
+type WorkflowPlanDTO = zw.Plan
+type WorkflowPlanStepDTO = zw.PlanStep
 type ArtifactDTO = artifacts.Artifact
 type BlueprintDTO = blueprint.Blueprint
 type PendingClarificationDTO = ClarificationDTO
 type ProposedChangeDTO = changes.ProposedChange
 type TestRunDTO = checks.TestRun
 type ReviewRunDTO = reviews.ReviewRun
+type WebSourceDTO = webresearch.Source
+type WebSettingsDTO = webresearch.Settings
 
 func NewService(ctx context.Context, sink EventSink) (*Service, error) {
 	paths, err := config.DefaultPaths()
@@ -239,6 +258,7 @@ func (s *Service) Bootstrap(ctx context.Context) (BootstrapState, error) {
 	if err != nil {
 		return BootstrapState{}, err
 	}
+	webSettings := s.webSettings(ctx)
 
 	selectedID, _, _ := s.store.GetSetting(ctx, selectedProjectSetting)
 	if selectedID == "" && len(projects) > 0 {
@@ -267,6 +287,7 @@ func (s *Service) Bootstrap(ctx context.Context) (BootstrapState, error) {
 		Agents:            s.AgentStatuses(),
 		Models:            models,
 		ActiveModelID:     activeModel.ID,
+		WebSettings:       webSettings,
 	}, nil
 }
 
@@ -433,6 +454,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		return ChatState{}, err
 	}
 	s.emitWorkflowRun(run)
+	_ = s.createDynamicWorkflowPlan(ctx, currentProject, *task, run.ID, provider, model, content, decision.Intent)
 
 	history, err := s.store.ListMessages(ctx, task.ID)
 	if err != nil {
@@ -441,6 +463,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	}
 	if decision.Intent == router.IntentPentestTask {
 		return s.runSecurityWorkflow(ctx, input.ProjectID, currentProject, *task, &run, history, provider, model, content)
+	}
+	if decision.Intent == router.IntentResearchTask {
+		return s.runWebResearchWorkflow(ctx, input.ProjectID, currentProject, *task, &run, history, provider, model, content)
 	}
 
 	result, err := s.runV03Workflow(ctx, currentProject, task.ID, &run, history, provider, model)
@@ -524,6 +549,11 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	if err := s.store.UpdateWorkflowRun(ctx, run.ID, finalStatus, zw.StepManagerFinal, finalError); err != nil {
 		return ChatState{}, err
 	}
+	if autoResult.Blocked {
+		_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusBlocked, finalError)
+	} else {
+		_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusDone, "")
+	}
 
 	run.Status = finalStatus
 	run.CurrentStep = zw.StepManagerFinal
@@ -605,6 +635,291 @@ func (s *Service) answerDirect(
 	return s.emitChatState(ctx, currentProject.ID, ""), nil
 }
 
+type dynamicPlanOutput struct {
+	Title string `json:"title"`
+	Steps []struct {
+		StepKey     string `json:"step_key"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Agent       string `json:"agent"`
+	} `json:"steps"`
+}
+
+func (s *Service) createDynamicWorkflowPlan(
+	ctx context.Context,
+	currentProject project.Project,
+	task chat.Task,
+	workflowRunID string,
+	provider llm.Provider,
+	model llm.ModelConfig,
+	userMessage string,
+	intent router.Intent,
+) error {
+	plan, steps := fallbackWorkflowPlan(currentProject, task, workflowRunID, userMessage, intent)
+
+	planCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	input := fmt.Sprintf("Intent: %s\nПроект: %s\nЗадача: %s", intent, currentProject.Name, userMessage)
+	if resp, err := provider.Generate(planCtx, agents.RequestForSpec(model.ModelName, agents.SpecForStep(zw.StepUserPlan), input)); err == nil && resp != nil {
+		if parsedPlan, parsedSteps, ok := parseDynamicWorkflowPlan(resp.Content, currentProject, task, workflowRunID, intent); ok {
+			plan = parsedPlan
+			steps = parsedSteps
+		}
+	}
+
+	_, _, err := s.store.CreateWorkflowPlan(ctx, plan, steps)
+	if err == nil {
+		s.emitChatState(ctx, currentProject.ID, "")
+	}
+	return err
+}
+
+func parseDynamicWorkflowPlan(raw string, currentProject project.Project, task chat.Task, workflowRunID string, intent router.Intent) (zw.Plan, []zw.PlanStep, bool) {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	trimmed = strings.TrimSpace(trimmed)
+	if start := strings.Index(trimmed, "{"); start >= 0 {
+		if end := strings.LastIndex(trimmed, "}"); end > start {
+			trimmed = trimmed[start : end+1]
+		}
+	}
+	var parsed dynamicPlanOutput
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return zw.Plan{}, nil, false
+	}
+	plan, fallbackSteps := fallbackWorkflowPlan(currentProject, task, workflowRunID, "", intent)
+	if strings.TrimSpace(parsed.Title) != "" {
+		plan.Title = strings.TrimSpace(parsed.Title)
+	}
+	steps := make([]zw.PlanStep, 0, len(parsed.Steps))
+	seen := map[string]bool{}
+	for _, item := range parsed.Steps {
+		title := strings.TrimSpace(item.Title)
+		if title == "" {
+			continue
+		}
+		stepKey := sanitizePlanStepKey(item.StepKey, title, len(steps)+1)
+		if seen[stepKey] {
+			stepKey = fmt.Sprintf("%s_%d", stepKey, len(steps)+1)
+		}
+		seen[stepKey] = true
+		steps = append(steps, zw.PlanStep{
+			StepKey:     stepKey,
+			Title:       title,
+			Description: strings.TrimSpace(item.Description),
+			AgentID:     normalizePlanAgent(item.Agent),
+			Status:      zw.StepStatusQueued,
+			SortOrder:   len(steps),
+		})
+		if len(steps) >= 8 {
+			break
+		}
+	}
+	if len(steps) == 0 {
+		return plan, fallbackSteps, false
+	}
+	return plan, steps, true
+}
+
+func sanitizePlanStepKey(value string, title string, index int) string {
+	key := strings.ToLower(strings.TrimSpace(value))
+	if key == "" {
+		key = strings.ToLower(strings.TrimSpace(title))
+	}
+	var builder strings.Builder
+	lastUnderscore := false
+	for _, char := range key {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' {
+			builder.WriteRune(char)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			builder.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	key = strings.Trim(builder.String(), "_")
+	if key == "" {
+		key = fmt.Sprintf("step_%d", index)
+	}
+	return key
+}
+
+func normalizePlanAgent(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case agents.ProductID:
+		return agents.ProductID
+	case agents.ArchitectID:
+		return agents.ArchitectID
+	case agents.DeveloperID:
+		return agents.DeveloperID
+	case agents.TesterID:
+		return agents.TesterID
+	case agents.ReviewerID:
+		return agents.ReviewerID
+	case agents.SecurityID:
+		return agents.SecurityID
+	default:
+		return agents.ManagerID
+	}
+}
+
+func fallbackWorkflowPlan(currentProject project.Project, task chat.Task, workflowRunID string, userMessage string, intent router.Intent) (zw.Plan, []zw.PlanStep) {
+	title := strings.TrimSpace(task.Title)
+	if title == "" {
+		title = titleFromContent(userMessage)
+	}
+	if title == "" {
+		title = "Выполнение задачи"
+	}
+	plan := zw.Plan{
+		ProjectID:     currentProject.ID,
+		TaskID:        task.ID,
+		WorkflowRunID: workflowRunID,
+		Title:         title,
+		Status:        zw.StatusRunning,
+	}
+	var specs []zw.PlanStep
+	switch intent {
+	case router.IntentResearchTask:
+		specs = []zw.PlanStep{
+			{StepKey: zw.StepWebResearch, Title: "Найти источники", Description: "Собрать актуальную информацию и проверить страницы", AgentID: agents.ManagerID},
+			{StepKey: zw.StepManagerFinal, Title: "Собрать ответ", Description: "Сформировать выводы со ссылками на источники", AgentID: agents.ManagerID},
+		}
+	case router.IntentPentestTask:
+		specs = []zw.PlanStep{
+			{StepKey: zw.StepSecurityAnalysis, Title: "Проверить scope", Description: "Разобрать разрешение, цели и безопасные границы задачи", AgentID: agents.SecurityID},
+			{StepKey: zw.StepManagerFinal, Title: "Собрать итог", Description: "Выдать defensive-рекомендации или вопросы на уточнение", AgentID: agents.ManagerID},
+		}
+	default:
+		specs = []zw.PlanStep{
+			{StepKey: zw.StepManagerIntake, Title: "Понять задачу", Description: "Собрать цель, ограничения и недостающий контекст", AgentID: agents.ManagerID},
+			{StepKey: zw.StepProductRequirements, Title: "Сформировать требования", Description: "Зафиксировать ожидаемое поведение и критерии готовности", AgentID: agents.ProductID},
+			{StepKey: zw.StepTaskBlueprint, Title: "Зафиксировать контракт", Description: "Определить стек, файлы, entrypoint и проверки", AgentID: agents.ArchitectID},
+			{StepKey: zw.StepArchitectPlan, Title: "Спроектировать решение", Description: "Определить технический подход и риски", AgentID: agents.ArchitectID},
+			{StepKey: zw.StepDeveloperPlan, Title: "Написать код", Description: "Подготовить и применить изменения в проекте", AgentID: agents.DeveloperID},
+			{StepKey: zw.StepTesterCommands, Title: "Проверить", Description: "Запустить релевантные команды проверки", AgentID: agents.TesterID},
+			{StepKey: zw.StepReview, Title: "Провести ревью", Description: "Проверить diff, тесты и соответствие задаче", AgentID: agents.ReviewerID},
+			{StepKey: zw.StepManagerFinal, Title: "Собрать итог", Description: "Коротко объяснить результат и важные детали", AgentID: agents.ManagerID},
+		}
+	}
+	for index := range specs {
+		specs[index].Status = zw.StepStatusQueued
+		specs[index].SortOrder = index
+	}
+	return plan, specs
+}
+
+func (s *Service) runWebResearchWorkflow(
+	ctx context.Context,
+	projectID string,
+	currentProject project.Project,
+	task chat.Task,
+	run *zw.Run,
+	history []chat.Message,
+	provider llm.Provider,
+	model llm.ModelConfig,
+	userMessage string,
+) (ChatState, error) {
+	settings := s.webSettings(ctx)
+	if !settings.Enabled {
+		message := "## Web research выключен\n\nВключи поиск в настройках, и я смогу искать актуальную информацию в интернете с сохранением источников."
+		_, _ = s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, message)
+		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepWebResearch, "web research выключен")
+		_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusBlocked, "web research выключен")
+		s.setAgentStatus(agents.ManagerID, "failed", "Web research выключен", model.ID)
+		return s.emitChatState(ctx, projectID, ""), nil
+	}
+
+	planOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepWebResearch, buildWebResearchPlanInput(userMessage, currentProject, history))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepWebResearch, model.ID, err), nil
+	}
+	plan := webresearch.ParsePlan(planOutput, userMessage)
+
+	s.setAgentStatus(agents.ManagerID, "searching_web", "Ищет источники в интернете", model.ID)
+	searchCtx, cancel := context.WithTimeout(ctx, time.Duration(settings.TimeoutSeconds*settings.MaxPagesPerWorkflow+6)*time.Second)
+	sources, searchErr := webresearch.NewClient(time.Duration(settings.TimeoutSeconds)*time.Second).Research(searchCtx, plan, settings)
+	cancel()
+	if searchErr != nil {
+		message := fmt.Sprintf("## Не нашла источники\n\n%s", searchErr.Error())
+		_, _ = s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, message)
+		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepWebResearch, searchErr.Error())
+		_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusBlocked, searchErr.Error())
+		s.setAgentStatus(agents.ManagerID, "failed", "Не нашла источники", model.ID)
+		return s.emitChatState(ctx, projectID, ""), nil
+	}
+
+	for _, source := range sources {
+		source.ProjectID = currentProject.ID
+		source.TaskID = task.ID
+		source.WorkflowRunID = run.ID
+		source.AgentID = agents.ManagerID
+		_, _ = s.store.CreateWebSource(ctx, source)
+	}
+
+	answerCtx, answerCancel := context.WithTimeout(ctx, 90*time.Second)
+	defer answerCancel()
+	s.setAgentStatus(agents.ManagerID, "answering", "Собирает ответ по источникам", model.ID)
+	resp, err := provider.Generate(answerCtx, llm.Request{
+		Model: model.ModelName,
+		Messages: []llm.Message{
+			{
+				Role: "system",
+				Content: agents.WithDefaultSkills(`
+Ты Люмен, входной агент локального AI-завода.
+Отвечай на русском языке. Говори о себе в женском роде: "нашла", "проверила", "собрала".
+Сейчас режим Web Research: отвечай только на основе найденных источников и явно отделяй выводы от фактов.
+Не выводи сырой JSON. Не утверждай, что меняла файлы или запускала проверки.
+Если источников мало или они слабые, скажи об этом прямо.
+Формат:
+## Коротко
+## Детали
+## Источники
+`),
+			},
+			{
+				Role:    "user",
+				Content: buildWebResearchAnswerInput(userMessage, currentProject, plan, sources),
+			},
+		},
+		Temperature: 0.2,
+		MaxTokens:   1600,
+	})
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepWebResearch, model.ID, err), nil
+	}
+	answer := strings.TrimSpace(resp.Content)
+	if answer == "" {
+		answer = webResearchFallbackAnswer(sources)
+	}
+	if looksLikeRepetitionLoop(answer) || len(answer) > managerMaxAnswerBytes {
+		answer = webResearchFallbackAnswer(sources)
+	}
+	if !strings.Contains(strings.ToLower(answer), "источник") {
+		answer += "\n\n" + webResearchSourcesSection(sources)
+	}
+	if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, answer); err != nil {
+		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusFailed, zw.StepWebResearch, err.Error())
+		return ChatState{}, err
+	}
+	if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusDone, zw.StepWebResearch, ""); err != nil {
+		return ChatState{}, err
+	}
+	_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusDone, "")
+	run.Status = zw.StatusDone
+	run.CurrentStep = zw.StepWebResearch
+	run.FinishedAt = nowString()
+	run.Error = ""
+	s.emitWorkflowRun(*run)
+	_ = s.store.TouchTask(ctx, task.ID)
+	s.resetAgentStatuses(model.ID)
+	return s.emitChatState(ctx, projectID, ""), nil
+}
+
 func (s *Service) runSecurityWorkflow(
 	ctx context.Context,
 	projectID string,
@@ -630,6 +945,7 @@ func (s *Service) runSecurityWorkflow(
 	if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusDone, zw.StepSecurityAnalysis, ""); err != nil {
 		return ChatState{}, err
 	}
+	_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusDone, "")
 	run.Status = zw.StatusDone
 	run.CurrentStep = zw.StepSecurityAnalysis
 	run.FinishedAt = nowString()
@@ -661,7 +977,7 @@ func (s *Service) classifyIntentWithModel(
 Классифицируй сообщение пользователя для локального AI-завода.
 Верни строго JSON:
 {
-  "intent": "direct_answer|project_analysis|coding_task|clarification_answer|workflow_control|pentest_task|general_chat",
+  "intent": "direct_answer|project_analysis|coding_task|clarification_answer|workflow_control|pentest_task|research_task|general_chat",
   "confidence": "high|medium|low",
   "reason": "короткая причина",
   "needs_project_context": true,
@@ -676,6 +992,7 @@ func (s *Service) classifyIntentWithModel(
 - project_analysis если нужно читать проект, но не менять файлы.
 - workflow_control если пользователь управляет текущим workflow.
 - pentest_task если запрос про безопасность/пентест/уязвимости.
+- research_task если пользователь явно просит найти, проверить или актуализировать информацию в интернете.
 - general_chat если вопрос общий и не про проект.
 `),
 			},
@@ -1099,6 +1416,7 @@ func (s *Service) RunTestCommand(ctx context.Context, input RunTestCommandInput)
 		modelID = model.ID
 	}
 	s.setAgentStatus(agents.TesterID, "running", "Запускает проверку: "+testRun.Command, modelID)
+	_ = s.store.StartWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID)
 
 	if err := s.store.MarkTestRunRunning(ctx, testRun.ID); err != nil {
 		return ChatState{}, err
@@ -1112,10 +1430,13 @@ func (s *Service) RunTestCommand(ctx context.Context, input RunTestCommandInput)
 	_ = testRun.TaskID
 	if result.Status == checks.StatusPassed {
 		s.setAgentStatus(agents.TesterID, "done", "Проверка прошла", modelID)
+		_ = s.store.FinishWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID, zw.StepStatusDone, "")
 	} else if result.Status == checks.StatusBlocked {
 		s.setAgentStatus(agents.TesterID, "failed", "Команда заблокирована allowlist", modelID)
+		_ = s.store.FinishWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID, zw.StepStatusFailed, "команда заблокирована allowlist")
 	} else {
 		s.setAgentStatus(agents.TesterID, "failed", "Проверка завершилась ошибкой", modelID)
+		_ = s.store.FinishWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID, zw.StepStatusFailed, result.Error)
 	}
 	return s.emitChatState(ctx, projectID, ""), nil
 }
@@ -1132,6 +1453,7 @@ func (s *Service) runPendingTestsNow(ctx context.Context, project project.Projec
 		if testRun.Status != checks.StatusPending {
 			continue
 		}
+		_ = s.store.StartWorkflowPlanStep(ctx, workflowRunID, zw.StepTesterCommands, agents.TesterID)
 		s.setAgentStatus(agents.TesterID, "running", "Запускает проверку: "+testRun.Command, modelID)
 		if err := s.store.MarkTestRunRunning(ctx, testRun.ID); err != nil {
 			failed++
@@ -1159,6 +1481,15 @@ func (s *Service) runPendingTestsNow(ctx context.Context, project project.Projec
 		s.setAgentStatus(agents.TesterID, "done", "Часть проверок не применима", modelID)
 	} else {
 		s.setAgentStatus(agents.TesterID, "done", "Проверки завершены", modelID)
+	}
+	if passed+failed+blocked > 0 {
+		status := zw.StepStatusDone
+		errText := ""
+		if failed+blocked > 0 {
+			status = zw.StepStatusFailed
+			errText = "часть проверок завершилась ошибкой или была заблокирована"
+		}
+		_ = s.store.FinishWorkflowPlanStep(ctx, workflowRunID, zw.StepTesterCommands, agents.TesterID, status, errText)
 	}
 	return passed, failed, blocked
 }
@@ -1349,6 +1680,37 @@ func (s *Service) CheckModel(ctx context.Context, modelID string) ([]ModelConfig
 	return models, nil
 }
 
+func (s *Service) SaveWebSettings(ctx context.Context, input SaveWebSettingsInput) (WebSettingsDTO, error) {
+	settings := webresearch.NormalizeSettings(webresearch.Settings{
+		Enabled:             input.Enabled,
+		MaxResults:          input.MaxResults,
+		MaxPagesPerWorkflow: input.MaxPagesPerWorkflow,
+		TimeoutSeconds:      input.TimeoutSeconds,
+		AllowedDomains:      input.AllowedDomains,
+		BlockedDomains:      input.BlockedDomains,
+	})
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return WebSettingsDTO{}, err
+	}
+	if err := s.store.SetSetting(ctx, webSettingsKey, string(data)); err != nil {
+		return WebSettingsDTO{}, err
+	}
+	return settings, nil
+}
+
+func (s *Service) webSettings(ctx context.Context) webresearch.Settings {
+	raw, ok, err := s.store.GetSetting(ctx, webSettingsKey)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return webresearch.DefaultSettings()
+	}
+	var settings webresearch.Settings
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		return webresearch.DefaultSettings()
+	}
+	return webresearch.NormalizeSettings(settings)
+}
+
 func (s *Service) startModelHealthMonitor(ctx context.Context) {
 	go func() {
 		stableOnlineChecks := 0
@@ -1498,6 +1860,7 @@ func (s *Service) runWorkflowStep(
 	input string,
 ) (string, error) {
 	spec := agents.SpecForStep(stepKey)
+	_ = s.store.StartWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID)
 	run.CurrentStep = stepKey
 	run.Status = zw.StatusRunning
 	if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusRunning, stepKey, ""); err != nil {
@@ -1524,6 +1887,7 @@ func (s *Service) runWorkflowStep(
 		if finishErr == nil {
 			s.emitWorkflowStep(*run, failed)
 		}
+		_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusFailed, err.Error())
 		s.setAgentStatus(spec.ID, "failed", "Ошибка вызова модели", model.ID)
 		return "", err
 	}
@@ -1535,6 +1899,7 @@ func (s *Service) runWorkflowStep(
 		if finishErr == nil {
 			s.emitWorkflowStep(*run, failed)
 		}
+		_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusFailed, err.Error())
 		s.setAgentStatus(spec.ID, "failed", "Пустой ответ модели", model.ID)
 		return "", err
 	}
@@ -1544,6 +1909,7 @@ func (s *Service) runWorkflowStep(
 		if finishErr == nil {
 			s.emitWorkflowStep(*run, failed)
 		}
+		_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusFailed, err.Error())
 		s.setAgentStatus(spec.ID, "failed", "Ответ модели остановлен", model.ID)
 		return "", err
 	}
@@ -1555,6 +1921,7 @@ func (s *Service) runWorkflowStep(
 		return "", err
 	}
 	s.emitWorkflowStep(*run, done)
+	_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusDone, "")
 	s.setAgentStatus(spec.ID, "done", stepDoneActivity(stepKey), model.ID)
 	s.emitChatState(ctx, projectID, "")
 	_ = taskID
@@ -1586,12 +1953,15 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 	messages := []chat.Message{}
 	var workflowRun *zw.Run
 	workflowSteps := []zw.Step{}
+	var workflowPlan *zw.Plan
+	planSteps := []zw.PlanStep{}
 	artifactsList := []artifacts.Artifact{}
 	var taskBlueprint *blueprint.Blueprint
 	var clarification *ClarificationDTO
 	proposedChanges := []changes.ProposedChange{}
 	testRuns := []checks.TestRun{}
 	reviewRuns := []reviews.ReviewRun{}
+	webSources := []webresearch.Source{}
 	if task != nil {
 		messages, err = s.store.ListMessages(ctx, task.ID)
 		if err != nil {
@@ -1603,6 +1973,10 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 		}
 		if workflowRun != nil {
 			workflowSteps, err = s.store.ListWorkflowSteps(ctx, workflowRun.ID)
+			if err != nil {
+				return ProjectState{}, err
+			}
+			workflowPlan, planSteps, err = s.store.LatestWorkflowPlan(ctx, workflowRun.ID)
 			if err != nil {
 				return ProjectState{}, err
 			}
@@ -1624,6 +1998,10 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 			if err != nil {
 				return ProjectState{}, err
 			}
+			webSources, err = s.store.ListWebSources(ctx, projectID, workflowRun.ID, 30)
+			if err != nil {
+				return ProjectState{}, err
+			}
 		}
 	}
 	artifactsList, err = s.store.ListArtifacts(ctx, projectID, 20)
@@ -1636,12 +2014,15 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 		Messages:      messages,
 		WorkflowRun:   workflowRun,
 		WorkflowSteps: workflowSteps,
+		WorkflowPlan:  workflowPlan,
+		PlanSteps:     planSteps,
 		Artifacts:     artifactsList,
 		Blueprint:     taskBlueprint,
 		Clarification: clarification,
 		Changes:       proposedChanges,
 		TestRuns:      testRuns,
 		Reviews:       reviewRuns,
+		WebSources:    webSources,
 	}, nil
 }
 
@@ -2015,6 +2396,7 @@ func (s *Service) handleWorkflowError(ctx context.Context, projectID string, tas
 	errorText := "Workflow остановлен: " + err.Error() + "\n\nПроверь настройки модели или уточни задачу и попробуй снова."
 	_, _ = s.store.AddMessage(ctx, taskID, "agent", agents.ManagerID, errorText)
 	_ = s.store.UpdateWorkflowRun(ctx, runID, zw.StatusFailed, currentStep, err.Error())
+	_ = s.store.FinishWorkflowPlan(ctx, runID, zw.StatusFailed, err.Error())
 	s.setAgentStatus(agents.ManagerID, "failed", "Workflow остановлен", modelID)
 	return s.emitChatState(ctx, projectID, err.Error())
 }
@@ -2291,6 +2673,77 @@ func buildSecurityAnalysisInput(userMessage string, project project.Project, his
 	builder.WriteString("\n# Source snapshot\n")
 	builder.WriteString(projectSourceSnapshot(project.Path))
 	builder.WriteString("\n\nСделай защитный ИБ-анализ по доступному контексту. Если для активного пентеста не хватает scope или подтверждения разрешения, явно попроси это как следующий шаг.")
+	return strings.TrimSpace(builder.String())
+}
+
+func buildWebResearchPlanInput(userMessage string, project project.Project, history []chat.Message) string {
+	var builder strings.Builder
+	builder.WriteString("Проект: ")
+	builder.WriteString(project.Name)
+	builder.WriteString("\nЛокальный путь проекта не отправляй в интернет: ")
+	builder.WriteString(project.Path)
+	builder.WriteString("\n\nЗапрос пользователя:\n")
+	builder.WriteString(userMessage)
+	if len(history) > 0 {
+		builder.WriteString("\n\nНедавний контекст диалога:\n")
+		for _, item := range recentMessages(history, 6) {
+			role := "Пользователь"
+			if item.Role == "agent" {
+				_, role = agents.Describe(item.AgentID)
+			}
+			builder.WriteString("- ")
+			builder.WriteString(role)
+			builder.WriteString(": ")
+			builder.WriteString(shortenForPrompt(item.Content, 350))
+			builder.WriteString("\n")
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func buildWebResearchAnswerInput(userMessage string, project project.Project, plan webresearch.Plan, sources []webresearch.Source) string {
+	var builder strings.Builder
+	builder.WriteString("Проект: ")
+	builder.WriteString(project.Name)
+	builder.WriteString("\nЗапрос пользователя:\n")
+	builder.WriteString(userMessage)
+	builder.WriteString("\n\nПлан поиска:\n")
+	if planJSON, err := json.MarshalIndent(plan, "", "  "); err == nil {
+		builder.Write(planJSON)
+	}
+	builder.WriteString("\n\nНайденные источники:\n")
+	builder.WriteString(webresearch.FormatSourcesForPrompt(sources))
+	builder.WriteString("\n\nТребования к ответу:\n")
+	builder.WriteString("- Ответь по сути запроса.\n")
+	builder.WriteString("- Добавь ссылки в разделе источников.\n")
+	builder.WriteString("- Ссылки пиши строго как обычный Markdown: [название](https://example.com). Не вкладывай одну ссылку внутрь другой и не экранируй круглые скобки.\n")
+	builder.WriteString("- Не придумывай факты, которых нет в источниках.\n")
+	return strings.TrimSpace(builder.String())
+}
+
+func webResearchFallbackAnswer(sources []webresearch.Source) string {
+	var builder strings.Builder
+	builder.WriteString("## Нашла источники\n\n")
+	builder.WriteString("Я собрала материалы, но модель не смогла надежно сформировать итоговый текст. Ниже список источников для ручной проверки.\n\n")
+	builder.WriteString(webResearchSourcesSection(sources))
+	return strings.TrimSpace(builder.String())
+}
+
+func webResearchSourcesSection(sources []webresearch.Source) string {
+	var builder strings.Builder
+	builder.WriteString("## Источники\n\n")
+	for index, source := range sources {
+		title := strings.TrimSpace(source.Title)
+		if title == "" {
+			title = source.URL
+		}
+		builder.WriteString(fmt.Sprintf("%d. [%s](%s)", index+1, title, source.URL))
+		if source.Snippet != "" {
+			builder.WriteString(" — ")
+			builder.WriteString(shortenForPrompt(source.Snippet, 180))
+		}
+		builder.WriteString("\n")
+	}
 	return strings.TrimSpace(builder.String())
 }
 
@@ -3424,7 +3877,7 @@ func normalizeIntentDecision(decision router.Decision) router.Decision {
 	decision.Confidence = strings.TrimSpace(decision.Confidence)
 	decision.Reason = strings.TrimSpace(decision.Reason)
 	switch decision.Intent {
-	case router.IntentCodingTask, router.IntentClarificationAnswer, router.IntentPentestTask:
+	case router.IntentCodingTask, router.IntentClarificationAnswer, router.IntentPentestTask, router.IntentResearchTask:
 		decision.NeedsWorkflow = true
 		decision.NeedsProjectContext = true
 	case router.IntentDirectAnswer, router.IntentProjectAnalysis, router.IntentWorkflowControl, router.IntentGeneralChat:
@@ -3447,6 +3900,8 @@ func directAnswerActivity(intent router.Intent) string {
 		return "Разбирает состояние workflow"
 	case router.IntentPentestTask:
 		return "Разбирает security-запрос"
+	case router.IntentResearchTask:
+		return "Ищет актуальную информацию"
 	case router.IntentGeneralChat:
 		return "Отвечает на общий вопрос"
 	default:
@@ -3711,6 +4166,8 @@ func stepThinkingActivity(stepKey string) string {
 		return "Проектирует технический план"
 	case zw.StepSecurityAnalysis:
 		return "Проводит ИБ-анализ"
+	case zw.StepWebResearch:
+		return "Планирует поиск в интернете"
 	case zw.StepDeveloperPlan:
 		return "Готовит план разработки"
 	case zw.StepTesterCommands:
@@ -3734,6 +4191,8 @@ func stepDoneActivity(stepKey string) string {
 		return "Архитектурный план готов"
 	case zw.StepSecurityAnalysis:
 		return "ИБ-анализ готов"
+	case zw.StepWebResearch:
+		return "Источники собраны"
 	case zw.StepDeveloperPlan:
 		return "План разработки готов"
 	case zw.StepTesterCommands:

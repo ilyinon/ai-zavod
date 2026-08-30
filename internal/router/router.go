@@ -11,6 +11,7 @@ const (
 	IntentClarificationAnswer Intent = "clarification_answer"
 	IntentWorkflowControl     Intent = "workflow_control"
 	IntentPentestTask         Intent = "pentest_task"
+	IntentResearchTask        Intent = "research_task"
 	IntentGeneralChat         Intent = "general_chat"
 )
 
@@ -68,6 +69,16 @@ func Route(message string, context Context) Decision {
 			Confidence:          "high",
 			Reason:              "запрос относится к безопасности или пентесту",
 			NeedsProjectContext: true,
+			NeedsWorkflow:       true,
+			Source:              "rules",
+		}
+	}
+	if hasResearchMarker(text) && !hasCodingVerb(text) {
+		return Decision{
+			Intent:              IntentResearchTask,
+			Confidence:          "high",
+			Reason:              "пользователь просит найти или проверить информацию в интернете",
+			NeedsProjectContext: likelyNeedsProjectContext(text),
 			NeedsWorkflow:       true,
 			Source:              "rules",
 		}
@@ -150,6 +161,15 @@ func hasProjectAnalysisMarker(text string) bool {
 		"посмотри архитектуру", "найди где", "где созда", "где ломается", "оцени качество",
 		"разберись в проекте", "проверь архитектуру", "почему кнопка", "почему не работает",
 		"что в проекте", "как устроен проект",
+	)
+}
+
+func hasResearchMarker(text string) bool {
+	return containsAny(text,
+		"найди в интернете", "поищи в интернете", "посмотри в интернете", "загугли",
+		"web search", "internet search", "поиск в интернете", "актуальную информацию",
+		"актуальные данные", "с источниками", "дай источники", "ссылки на источники",
+		"проверь в интернете", "проверь актуально", "что сейчас известно",
 	)
 }
 

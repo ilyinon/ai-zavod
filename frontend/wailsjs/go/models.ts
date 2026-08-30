@@ -113,12 +113,15 @@ export namespace app {
 	    messages: chat.Message[];
 	    workflowRun?: workflow.Run;
 	    workflowSteps: workflow.Step[];
+	    workflowPlan?: workflow.Plan;
+	    planSteps: workflow.PlanStep[];
 	    artifacts: artifacts.Artifact[];
 	    blueprint?: blueprint.Blueprint;
 	    clarification?: ClarificationDTO;
 	    changes: changes.ProposedChange[];
 	    testRuns: checks.TestRun[];
 	    reviews: reviews.ReviewRun[];
+	    webSources: webresearch.Source[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ProjectState(source);
@@ -131,12 +134,15 @@ export namespace app {
 	        this.messages = this.convertValues(source["messages"], chat.Message);
 	        this.workflowRun = this.convertValues(source["workflowRun"], workflow.Run);
 	        this.workflowSteps = this.convertValues(source["workflowSteps"], workflow.Step);
+	        this.workflowPlan = this.convertValues(source["workflowPlan"], workflow.Plan);
+	        this.planSteps = this.convertValues(source["planSteps"], workflow.PlanStep);
 	        this.artifacts = this.convertValues(source["artifacts"], artifacts.Artifact);
 	        this.blueprint = this.convertValues(source["blueprint"], blueprint.Blueprint);
 	        this.clarification = this.convertValues(source["clarification"], ClarificationDTO);
 	        this.changes = this.convertValues(source["changes"], changes.ProposedChange);
 	        this.testRuns = this.convertValues(source["testRuns"], checks.TestRun);
 	        this.reviews = this.convertValues(source["reviews"], reviews.ReviewRun);
+	        this.webSources = this.convertValues(source["webSources"], webresearch.Source);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -165,6 +171,7 @@ export namespace app {
 	    agents: agents.Status[];
 	    models: llm.ModelConfig[];
 	    activeModelId: string;
+	    webSettings: webresearch.Settings;
 	
 	    static createFrom(source: any = {}) {
 	        return new BootstrapState(source);
@@ -179,6 +186,7 @@ export namespace app {
 	        this.agents = this.convertValues(source["agents"], agents.Status);
 	        this.models = this.convertValues(source["models"], llm.ModelConfig);
 	        this.activeModelId = source["activeModelId"];
+	        this.webSettings = this.convertValues(source["webSettings"], webresearch.Settings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -205,12 +213,15 @@ export namespace app {
 	    messages: chat.Message[];
 	    workflowRun?: workflow.Run;
 	    workflowSteps: workflow.Step[];
+	    workflowPlan?: workflow.Plan;
+	    planSteps: workflow.PlanStep[];
 	    artifacts: artifacts.Artifact[];
 	    blueprint?: blueprint.Blueprint;
 	    clarification?: ClarificationDTO;
 	    changes: changes.ProposedChange[];
 	    testRuns: checks.TestRun[];
 	    reviews: reviews.ReviewRun[];
+	    webSources: webresearch.Source[];
 	    agents: agents.Status[];
 	    error?: string;
 	
@@ -225,12 +236,15 @@ export namespace app {
 	        this.messages = this.convertValues(source["messages"], chat.Message);
 	        this.workflowRun = this.convertValues(source["workflowRun"], workflow.Run);
 	        this.workflowSteps = this.convertValues(source["workflowSteps"], workflow.Step);
+	        this.workflowPlan = this.convertValues(source["workflowPlan"], workflow.Plan);
+	        this.planSteps = this.convertValues(source["planSteps"], workflow.PlanStep);
 	        this.artifacts = this.convertValues(source["artifacts"], artifacts.Artifact);
 	        this.blueprint = this.convertValues(source["blueprint"], blueprint.Blueprint);
 	        this.clarification = this.convertValues(source["clarification"], ClarificationDTO);
 	        this.changes = this.convertValues(source["changes"], changes.ProposedChange);
 	        this.testRuns = this.convertValues(source["testRuns"], checks.TestRun);
 	        this.reviews = this.convertValues(source["reviews"], reviews.ReviewRun);
+	        this.webSources = this.convertValues(source["webSources"], webresearch.Source);
 	        this.agents = this.convertValues(source["agents"], agents.Status);
 	        this.error = source["error"];
 	    }
@@ -346,6 +360,28 @@ export namespace app {
 	        this.apiKeyRef = source["apiKeyRef"];
 	        this.modelName = source["modelName"];
 	        this.isActive = source["isActive"];
+	    }
+	}
+	export class SaveWebSettingsInput {
+	    enabled: boolean;
+	    maxResults: number;
+	    maxPagesPerWorkflow: number;
+	    timeoutSeconds: number;
+	    allowedDomains: string[];
+	    blockedDomains: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveWebSettingsInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.maxResults = source["maxResults"];
+	        this.maxPagesPerWorkflow = source["maxPagesPerWorkflow"];
+	        this.timeoutSeconds = source["timeoutSeconds"];
+	        this.allowedDomains = source["allowedDomains"];
+	        this.blockedDomains = source["blockedDomains"];
 	    }
 	}
 	export class SendMessageInput {
@@ -878,8 +914,133 @@ export namespace reviews {
 
 }
 
+export namespace webresearch {
+	
+	export class Settings {
+	    enabled: boolean;
+	    maxResults: number;
+	    maxPagesPerWorkflow: number;
+	    timeoutSeconds: number;
+	    allowedDomains: string[];
+	    blockedDomains: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Settings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.maxResults = source["maxResults"];
+	        this.maxPagesPerWorkflow = source["maxPagesPerWorkflow"];
+	        this.timeoutSeconds = source["timeoutSeconds"];
+	        this.allowedDomains = source["allowedDomains"];
+	        this.blockedDomains = source["blockedDomains"];
+	    }
+	}
+	export class Source {
+	    id: string;
+	    projectId: string;
+	    taskId: string;
+	    workflowRunId: string;
+	    agentId: string;
+	    query: string;
+	    title: string;
+	    url: string;
+	    snippet: string;
+	    contentExcerpt: string;
+	    sourceType: string;
+	    trustLevel: string;
+	    fetchedAt: string;
+	    createdAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Source(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.projectId = source["projectId"];
+	        this.taskId = source["taskId"];
+	        this.workflowRunId = source["workflowRunId"];
+	        this.agentId = source["agentId"];
+	        this.query = source["query"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.snippet = source["snippet"];
+	        this.contentExcerpt = source["contentExcerpt"];
+	        this.sourceType = source["sourceType"];
+	        this.trustLevel = source["trustLevel"];
+	        this.fetchedAt = source["fetchedAt"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
+
+}
+
 export namespace workflow {
 	
+	export class Plan {
+	    id: string;
+	    projectId: string;
+	    taskId: string;
+	    workflowRunId: string;
+	    title: string;
+	    status: string;
+	    currentStepId: string;
+	    createdAt: string;
+	    updatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Plan(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.projectId = source["projectId"];
+	        this.taskId = source["taskId"];
+	        this.workflowRunId = source["workflowRunId"];
+	        this.title = source["title"];
+	        this.status = source["status"];
+	        this.currentStepId = source["currentStepId"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+	export class PlanStep {
+	    id: string;
+	    planId: string;
+	    stepKey: string;
+	    title: string;
+	    description: string;
+	    agentId: string;
+	    status: string;
+	    startedAt: string;
+	    finishedAt: string;
+	    error: string;
+	    sortOrder: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PlanStep(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.planId = source["planId"];
+	        this.stepKey = source["stepKey"];
+	        this.title = source["title"];
+	        this.description = source["description"];
+	        this.agentId = source["agentId"];
+	        this.status = source["status"];
+	        this.startedAt = source["startedAt"];
+	        this.finishedAt = source["finishedAt"];
+	        this.error = source["error"];
+	        this.sortOrder = source["sortOrder"];
+	    }
+	}
 	export class Run {
 	    id: string;
 	    taskId: string;

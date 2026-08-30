@@ -134,6 +134,13 @@ func (a *App) CheckModel(modelID string) ([]appsvc.ModelConfigDTO, error) {
 	return a.service.CheckModel(a.ctx, modelID)
 }
 
+func (a *App) SaveWebSettings(input appsvc.SaveWebSettingsInput) (appsvc.WebSettingsDTO, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.WebSettingsDTO{}, err
+	}
+	return a.service.SaveWebSettings(a.ctx, input)
+}
+
 func (a *App) ready() error {
 	if a.initErr != nil {
 		return a.initErr

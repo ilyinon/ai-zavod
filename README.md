@@ -18,6 +18,7 @@
 - Роли: Люмен, Продакт, Архитектор, Разработчик, Тестировщик, Ревьюер, ИБ-специалист.
 - Autopilot workflow: задача, требования, blueprint, архитектура, разработка, проверки, ревью, итог.
 - Подключение OpenAI-compatible моделей: OpenAI, удаленная Qwen, LM Studio, vLLM и похожие API.
+- Web research для актуальной информации и ответов с источниками.
 - Controlled project writes: код пишется только через структурированные proposed changes.
 - Python-проекты запускаются через project-local `.venv` и `requirements.txt`.
 
@@ -25,7 +26,7 @@
 
 - macOS, основной целевой режим разработки.
 - Go `1.26+` для сборки самого Zavod AI.
-- Node.js `20+`.
+- Node.js `24+`.
 - npm.
 - Wails CLI `v2.10+`.
 
@@ -49,11 +50,11 @@ npm --version
 ```bash
 git clone <repo-url> zavod-ai
 cd zavod-ai
-sh scripts/frontend-install.sh
-wails dev
+make dev
 ```
 
 После запуска откройте настройки моделей в приложении и добавьте provider.
+Во вкладке "Интернет" можно включить/выключить web research, ограничить число источников и задать allowlist/blocklist доменов.
 
 Пример OpenAI-compatible Qwen по сети:
 
@@ -80,7 +81,7 @@ API key: <OPENAI_API_KEY>
 Собрать production `.app`:
 
 ```bash
-wails build
+make app
 ```
 
 Готовое приложение появится здесь:
@@ -120,9 +121,8 @@ open "/Applications/Zavod AI.app"
 Собрать начисто:
 
 ```bash
-rm -rf build/bin frontend/dist
-sh scripts/frontend-install.sh
-wails build
+make clean
+make app
 ```
 
 Проверить, что внутри `.app` есть исполняемый файл:
@@ -140,7 +140,7 @@ zavod-ai
 Собрать `.dmg` для распространения:
 
 ```bash
-sh scripts/package-dmg.sh
+make dmg
 ```
 
 Готовый образ появится здесь:
@@ -174,7 +174,7 @@ open "/Applications/Zavod AI.app"
 
 Что делает CI:
 
-1. Устанавливает Go и Node.js.
+1. Устанавливает Go и Node.js 24.
 2. Устанавливает Wails CLI.
 3. Ставит frontend dependencies.
 4. Запускает `npm run build --prefix frontend`.
@@ -182,6 +182,13 @@ open "/Applications/Zavod AI.app"
 6. Собирает macOS-приложение через `wails build`.
 7. Упаковывает `build/bin/Zavod AI.app` в `.dmg`.
 8. Загружает `.dmg` как GitHub Actions artifact.
+
+Workflow использует Node 24-compatible versions GitHub Actions:
+
+- `actions/checkout@v6`
+- `actions/setup-go@v7`
+- `actions/setup-node@v7`
+- `actions/upload-artifact@v7`
 
 Скачать установочный образ можно в GitHub:
 
@@ -197,6 +204,20 @@ open "/Applications/Zavod AI.app"
 ```
 
 ## Разработка
+
+Основные команды:
+
+```bash
+make help       # список команд
+make deps       # установить frontend dependencies
+make dev        # dev-режим Wails
+make test       # frontend build + go test ./...
+make app        # собрать build/bin/Zavod AI.app
+make dmg        # собрать build/bin/Zavod-AI.dmg
+make build      # полный локальный build: test + .app + .dmg
+make install    # установить .app в /Applications
+make clean      # удалить build/bin и frontend/dist
+```
 
 Backend:
 
@@ -220,11 +241,7 @@ wails dev
 Полная локальная проверка перед коммитом:
 
 ```bash
-cd frontend
-npm run build
-cd ..
-go test ./...
-wails build
+make build
 ```
 
 На чистом checkout `go test ./...` нужно запускать после frontend build, потому что `main.go` встраивает `frontend/dist` через Go embed.

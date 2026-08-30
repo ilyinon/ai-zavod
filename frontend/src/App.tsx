@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, MouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AgentStatus,
   AgentMessageDelta,
@@ -11,7 +11,11 @@ import {
   Project,
   ProjectState,
   TaskBlueprint,
+  WebSource,
+  WebSettings,
   WorkflowRun,
+  WorkflowPlan,
+  WorkflowPlanStep,
   WorkflowStep,
   backend,
 } from './lib/backend';
@@ -22,12 +26,14 @@ import productAvatar from './assets/avatars/product.png';
 import reviewerAvatar from './assets/avatars/reviewer.png';
 import securityAvatar from './assets/avatars/security.svg';
 import testerAvatar from './assets/avatars/tester.png';
+import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
 
 const statusLabels: Record<string, string> = {
   idle: 'свободен',
   thinking: 'думает',
   calling_model: 'вызывает модель',
   answering: 'пишет ответ',
+  searching_web: 'ищет',
   writing_files: 'сохраняет',
   done: 'готово',
   failed: 'ошибка',
@@ -44,6 +50,7 @@ const workflowStepLabels: Record<string, string> = {
   task_blueprint: 'Blueprint',
   architect_plan: 'Архитектурный план',
   security_analysis: 'ИБ-анализ',
+  web_research: 'Поиск в сети',
   developer_plan: 'Разработка',
   tester_commands: 'Проверка',
   review: 'Ревью',
@@ -62,6 +69,7 @@ const workflowStepOrder = [
 ];
 
 const securityWorkflowStepOrder = ['security_analysis'];
+const researchWorkflowStepOrder = ['web_research'];
 
 const modelStatusLabels: Record<string, string> = {
   unknown: 'не проверялась',
@@ -112,7 +120,16 @@ const emptyModel: ModelConfig = {
   updatedAt: '',
 };
 
-type SettingsTab = 'projects' | 'models';
+const defaultWebSettings: WebSettings = {
+  enabled: true,
+  maxResults: 5,
+  maxPagesPerWorkflow: 8,
+  timeoutSeconds: 8,
+  allowedDomains: [],
+  blockedDomains: [],
+};
+
+type SettingsTab = 'projects' | 'models' | 'web';
 
 function App() {
   const [paths, setPaths] = useState<AppPaths | null>(null);
@@ -122,12 +139,17 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [workflowRun, setWorkflowRun] = useState<WorkflowRun | null>(null);
   const [workflowSteps, setWorkflowSteps] = useState<WorkflowStep[]>([]);
+  const [workflowPlan, setWorkflowPlan] = useState<WorkflowPlan | null>(null);
+  const [planSteps, setPlanSteps] = useState<WorkflowPlanStep[]>([]);
   const [blueprint, setBlueprint] = useState<TaskBlueprint | null>(null);
   const [clarification, setClarification] = useState<PendingClarification | null>(null);
   const [changes, setChanges] = useState<ProposedChange[]>([]);
+  const [webSources, setWebSources] = useState<WebSource[]>([]);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [activeModelId, setActiveModelId] = useState('');
+  const [webSettings, setWebSettings] = useState<WebSettings>(defaultWebSettings);
+  const [savingWebSettings, setSavingWebSettings] = useState(false);
   const [projectQuery, setProjectQuery] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
   const [existingProjectName, setExistingProjectName] = useState('');
@@ -257,6 +279,7 @@ function App() {
       setAgents(state.agents);
       setModels(state.models);
       setActiveModelId(state.activeModelId);
+      setWebSettings(state.webSettings ?? defaultWebSettings);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -272,9 +295,12 @@ function App() {
     setMessages(state.messages ?? []);
     setWorkflowRun(state.workflowRun ?? null);
     setWorkflowSteps(state.workflowSteps ?? []);
+    setWorkflowPlan(state.workflowPlan ?? null);
+    setPlanSteps(state.planSteps ?? []);
     setBlueprint(state.blueprint ?? null);
     setClarification(state.clarification ?? null);
     setChanges(state.changes ?? []);
+    setWebSources(state.webSources ?? []);
   }
 
   function applyChatState(state: ChatState) {
@@ -560,6 +586,20 @@ function App() {
     }
   }
 
+  async function handleSaveWebSettings(event: FormEvent) {
+    event.preventDefault();
+    setSavingWebSettings(true);
+    setError('');
+    try {
+      const saved = await backend.saveWebSettings(webSettings);
+      setWebSettings(saved);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingWebSettings(false);
+    }
+  }
+
   async function handleApplyChanges() {
     if (!selectedProjectId || !workflowRun?.id || pendingChanges.length === 0 || applyingChanges) {
       return;
@@ -820,18 +860,23 @@ function App() {
           </form>
         )}
 
-        {visibleChanges.length > 0 && (
-          <ChangeSummaryDock
-            changes={visibleChanges}
-            summary={changeSummary}
-            pendingCount={pendingChanges.length}
-            isOpen={changesDockOpen}
-            expandedDiffIds={expandedDiffIds}
-            applyingChanges={applyingChanges}
-            onToggleOpen={() => setChangesDockOpen((value) => !value)}
-            onToggleDiff={toggleDiff}
-            onApplyChanges={handleApplyChanges}
-          />
+        {(visibleChanges.length > 0 || planSteps.length > 0) && (
+          <div className="dock-row" aria-label="Сводка выполнения">
+            {visibleChanges.length > 0 && (
+              <ChangeSummaryDock
+                changes={visibleChanges}
+                summary={changeSummary}
+                pendingCount={pendingChanges.length}
+                isOpen={changesDockOpen}
+                expandedDiffIds={expandedDiffIds}
+                applyingChanges={applyingChanges}
+                onToggleOpen={() => setChangesDockOpen((value) => !value)}
+                onToggleDiff={toggleDiff}
+                onApplyChanges={handleApplyChanges}
+              />
+            )}
+            {planSteps.length > 0 && <StepDock plan={workflowPlan} steps={planSteps} />}
+          </div>
         )}
 
         <form className="composer" onSubmit={handleSendMessage}>
@@ -849,6 +894,31 @@ function App() {
       </section>
 
       <aside className="sidebar agents-panel">
+        {webSources.length > 0 && (
+          <section className="right-section web-sources-section">
+            <div className="panel-heading compact">
+              <div>
+                <h2>Источники</h2>
+              </div>
+              <span className="review-status medium">{webSources.length}</span>
+            </div>
+            <div className="web-source-list">
+              {webSources.slice(0, 6).map((source, index) => (
+                <a
+                  key={source.id || source.url || index}
+                  className="web-source-item"
+                  href={source.url}
+                  onClick={(event) => openExternalLink(event, source.url)}
+                >
+                  <strong>{source.title || hostFromUrl(source.url)}</strong>
+                  <span>{hostFromUrl(source.url)}</span>
+                  {source.snippet && <p>{shortPreview(source.snippet, 110)}</p>}
+                </a>
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="right-section artifacts-section">
           <div className="panel-heading compact">
             <div>
@@ -923,6 +993,13 @@ function App() {
                 onClick={() => setSettingsTab('models')}
               >
                 LLM
+              </button>
+              <button
+                className={settingsTab === 'web' ? 'active' : ''}
+                type="button"
+                onClick={() => setSettingsTab('web')}
+              >
+                Интернет
               </button>
             </div>
 
@@ -1137,6 +1214,111 @@ function App() {
                   </div>
                 </form>
               </div>
+            )}
+
+            {settingsTab === 'web' && (
+              <form className="settings-content" onSubmit={handleSaveWebSettings}>
+                <section className="settings-section web-settings-section">
+                  <div className="settings-section-heading">
+                    <div>
+                      <h3>Web research</h3>
+                      <p className="muted">Люмен использует сеть только для запросов, где нужен актуальный поиск или источники.</p>
+                    </div>
+                  </div>
+
+                  <label className="checkbox-row web-toggle">
+                    <input
+                      type="checkbox"
+                      checked={webSettings.enabled}
+                      onChange={(event) => setWebSettings({ ...webSettings, enabled: event.target.checked })}
+                    />
+                    <span>Разрешить поиск в интернете</span>
+                  </label>
+
+                  <div className="settings-grid-two">
+                    <label className="field-label" htmlFor="web-max-results">
+                      Результатов на запрос
+                    </label>
+                    <input
+                      id="web-max-results"
+                      className="input"
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={webSettings.maxResults}
+                      onChange={(event) => setWebSettings({ ...webSettings, maxResults: Number(event.target.value) })}
+                    />
+
+                    <label className="field-label" htmlFor="web-max-pages">
+                      Страниц на workflow
+                    </label>
+                    <input
+                      id="web-max-pages"
+                      className="input"
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={webSettings.maxPagesPerWorkflow}
+                      onChange={(event) => setWebSettings({ ...webSettings, maxPagesPerWorkflow: Number(event.target.value) })}
+                    />
+
+                    <label className="field-label" htmlFor="web-timeout">
+                      Таймаут, сек
+                    </label>
+                    <input
+                      id="web-timeout"
+                      className="input"
+                      type="number"
+                      min={2}
+                      max={30}
+                      value={webSettings.timeoutSeconds}
+                      onChange={(event) => setWebSettings({ ...webSettings, timeoutSeconds: Number(event.target.value) })}
+                    />
+                  </div>
+
+                  <div className="field-heading-row">
+                    <label className="field-label" htmlFor="web-allowed">
+                      Ограничить домены
+                    </label>
+                    {webSettings.allowedDomains.length > 0 ? (
+                      <button
+                        className="inline-action-button"
+                        type="button"
+                        onClick={() => setWebSettings({ ...webSettings, allowedDomains: [] })}
+                      >
+                        Разрешить все
+                      </button>
+                    ) : (
+                      <span className="field-state-pill">все публичные сайты</span>
+                    )}
+                  </div>
+                  <textarea
+                    id="web-allowed"
+                    className="input textarea"
+                    placeholder="Пусто = разрешены все публичные сайты"
+                    value={webSettings.allowedDomains.join('\n')}
+                    onChange={(event) => setWebSettings({ ...webSettings, allowedDomains: splitDomainList(event.target.value) })}
+                  />
+                  <p className="field-hint">
+                    Заполняй только если нужно сузить поиск до конкретных доменов.
+                  </p>
+
+                  <label className="field-label" htmlFor="web-blocked">
+                    Заблокировать домены
+                  </label>
+                  <textarea
+                    id="web-blocked"
+                    className="input textarea"
+                    placeholder="example.com"
+                    value={webSettings.blockedDomains.join('\n')}
+                    onChange={(event) => setWebSettings({ ...webSettings, blockedDomains: splitDomainList(event.target.value) })}
+                  />
+
+                  <button className="primary-button" type="submit" disabled={savingWebSettings}>
+                    {savingWebSettings ? 'Сохраняю...' : 'Сохранить интернет'}
+                  </button>
+                </section>
+              </form>
             )}
           </section>
         </div>
@@ -1353,6 +1535,49 @@ function ChangeSummaryDock({
   );
 }
 
+function StepDock({ plan, steps }: { plan?: WorkflowPlan | null; steps: WorkflowPlanStep[] }) {
+  const orderedSteps = [...steps].sort((left, right) => left.sortOrder - right.sortOrder);
+  const total = orderedSteps.length;
+  if (total === 0) {
+    return null;
+  }
+  const activeIndex = orderedSteps.findIndex((step) => step.id === plan?.currentStepId || step.status === 'running');
+  const doneCount = orderedSteps.filter((step) => step.status === 'done' || step.status === 'skipped').length;
+  const displayIndex = activeIndex >= 0 ? activeIndex + 1 : Math.max(1, Math.min(doneCount || 1, total));
+  const activeStep = orderedSteps[activeIndex >= 0 ? activeIndex : Math.min(displayIndex - 1, total - 1)];
+  const planStatus = plan?.status ?? activeStep?.status ?? 'queued';
+
+  return (
+    <section className="step-dock" aria-label="План выполнения">
+      <div className="step-dock-popover" role="tooltip">
+        <div className="step-dock-header">
+          <strong>{plan?.title || 'План выполнения'}</strong>
+          <span>{displayIndex}/{total}</span>
+        </div>
+        <div className="step-dock-list">
+          {orderedSteps.map((step, index) => (
+            <div key={step.id || `${step.stepKey}-${index}`} className={`step-dock-item ${step.status} ${step.id === activeStep?.id ? 'active' : ''}`}>
+              <span className={`step-dock-icon ${step.status}`}>{stepIcon(step.status, index + 1)}</span>
+              <div>
+                <div className="step-dock-title">
+                  <strong>{step.title}</strong>
+                  <span>{agentNameById(step.agentId || agentForStep(step.stepKey))}</span>
+                </div>
+                {step.description && <p>{step.description}</p>}
+                {step.error && <p className="workflow-step-error">{step.error}</p>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <button className={`step-dock-pill ${planStatus}`} type="button">
+        <span className={`step-dock-dot ${activeStep?.status || planStatus}`} aria-hidden="true" />
+        <span>Шаг {displayIndex} / {total}</span>
+      </button>
+    </section>
+  );
+}
+
 function DiffViewer({ diffText }: { diffText: string }) {
   return (
     <pre className="diff-viewer">
@@ -1515,6 +1740,9 @@ function agentForStep(stepKey: string): string {
   if (stepKey === 'security_analysis') {
     return 'security';
   }
+  if (stepKey === 'web_research') {
+    return 'manager';
+  }
   if (stepKey === 'product_requirements') {
     return 'product';
   }
@@ -1633,6 +1861,9 @@ function agentInfoById(agentId: string): AgentInfo {
 function workflowOrderFor(run: WorkflowRun | null | undefined, steps: WorkflowStep[]): string[] {
   if (run?.currentStep === 'security_analysis' || steps.some((step) => step.stepKey === 'security_analysis')) {
     return securityWorkflowStepOrder;
+  }
+  if (run?.currentStep === 'web_research' || steps.some((step) => step.stepKey === 'web_research')) {
+    return researchWorkflowStepOrder;
   }
   return workflowStepOrder;
 }
@@ -1777,15 +2008,74 @@ function parseMarkdown(content: string): MarkdownBlock[] {
 
 function renderInlineMarkdown(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const parts = text.split(/(`[^`]+`)/g);
+  const parts = normalizeInlineMarkdown(text).split(/(`[^`]+`)/g);
   parts.forEach((part, index) => {
     if (part.startsWith('`') && part.endsWith('`') && part.length > 1) {
       nodes.push(<code key={index}>{part.slice(1, -1)}</code>);
       return;
     }
-    nodes.push(...renderBoldMarkdown(part, `text-${index}`));
+    nodes.push(...renderTextLinks(part, `text-${index}`));
   });
   return nodes;
+}
+
+function normalizeInlineMarkdown(text: string): string {
+  return text
+    .replace(/\\([()[\]])/g, '$1')
+    .replace(/\[([^\]]+)\]\(\[(https?:\/\/[^\]\s]+)\]\((https?:\/\/[^)\s]+)\)\)/g, '[$1]($3)');
+}
+
+function renderTextLinks(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const linkPattern = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<]+)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = linkPattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(...renderBoldMarkdown(text.slice(lastIndex, match.index), `${keyPrefix}-plain-${nodes.length}`));
+    }
+
+    const label = match[1] || match[3] || '';
+    const rawUrl = match[2] || match[3] || '';
+    const { url, suffix } = splitLinkSuffix(rawUrl);
+    nodes.push(
+      <a key={`${keyPrefix}-link-${match.index}`} href={url} onClick={(event) => openExternalLink(event, url)}>
+        {label}
+      </a>,
+    );
+    if (suffix) {
+      nodes.push(suffix);
+    }
+    lastIndex = linkPattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(...renderBoldMarkdown(text.slice(lastIndex), `${keyPrefix}-plain-${nodes.length}`));
+  }
+
+  return nodes;
+}
+
+function splitLinkSuffix(rawUrl: string): { url: string; suffix: string } {
+  const match = rawUrl.match(/^(.+?)([.,;:!?]+)?$/);
+  return {
+    url: (match?.[1] ?? rawUrl).replace(/\\&/g, '&'),
+    suffix: match?.[2] ?? '',
+  };
+}
+
+function openExternalLink(event: MouseEvent<HTMLAnchorElement>, url: string) {
+  event.preventDefault();
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return;
+    }
+    BrowserOpenURL(parsed.toString());
+  } catch {
+    return;
+  }
 }
 
 function renderBoldMarkdown(text: string, keyPrefix: string): ReactNode[] {
@@ -1798,12 +2088,36 @@ function renderBoldMarkdown(text: string, keyPrefix: string): ReactNode[] {
   });
 }
 
-function shortPreview(value: string): string {
+function shortPreview(value: string, limit = 140): string {
   const compact = value.replace(/\s+/g, ' ').trim();
-  if (compact.length <= 140) {
+  if (compact.length <= limit) {
     return compact;
   }
-  return `${compact.slice(0, 140)}...`;
+  return `${compact.slice(0, limit)}...`;
+}
+
+function hostFromUrl(value: string): string {
+  try {
+    return new URL(value).hostname.replace(/^www\./, '');
+  } catch {
+    return value;
+  }
+}
+
+function stepIcon(status: string, index: number): ReactNode {
+  if (status === 'done') {
+    return '✓';
+  }
+  if (status === 'running') {
+    return '';
+  }
+  if (status === 'failed' || status === 'blocked') {
+    return '!';
+  }
+  if (status === 'skipped') {
+    return '-';
+  }
+  return index;
 }
 
 function summarizeChanges(items: DisplayChange[]): ChangeSummary {
@@ -2151,6 +2465,13 @@ function errorMessage(err: unknown): string {
     return err.message;
   }
   return String(err);
+}
+
+function splitDomainList(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 async function copyToClipboard(value: string) {

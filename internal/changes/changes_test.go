@@ -18,6 +18,44 @@ func TestExtractDraftsFromJSONFence(t *testing.T) {
 	}
 }
 
+func TestExtractDraftsNormalizesDoubleEscapedContent(t *testing.T) {
+	text := `## Proposed changes
+[
+  {
+    "file_path": "password_generator.py",
+    "action": "create",
+    "content": "import argparse\\nimport secrets\\n\\ndef main():\\n    print('ok')\\n"
+  }
+]`
+	drafts := ExtractDrafts(text)
+	if len(drafts) != 1 {
+		t.Fatalf("expected 1 draft, got %#v", drafts)
+	}
+	expected := "import argparse\nimport secrets\n\ndef main():\n    print('ok')\n"
+	if drafts[0].Content != expected {
+		t.Fatalf("expected content to be unescaped:\n%q", drafts[0].Content)
+	}
+}
+
+func TestExtractDraftsConvertsUnifiedDiffContent(t *testing.T) {
+	text := `## Proposed changes
+[
+  {
+    "file_path": "password_generator.py",
+    "action": "create",
+    "content": "--- /dev/null\n+++ password_generator.py\n@@\n+import argparse\\nimport secrets\\n\\ndef main():\\n    print('ok')\\n"
+  }
+]`
+	drafts := ExtractDrafts(text)
+	if len(drafts) != 1 {
+		t.Fatalf("expected 1 draft, got %#v", drafts)
+	}
+	expected := "import argparse\nimport secrets\n\ndef main():\n    print('ok')\n"
+	if drafts[0].Content != expected {
+		t.Fatalf("expected diff content to become file content:\n%q", drafts[0].Content)
+	}
+}
+
 func TestExtractDraftsWithErrorReportsMalformedProposedChanges(t *testing.T) {
 	text := "## Proposed changes\n[{\"file_path\":\"main.go\",\"action\":\"create\",\"content\":\"if value == \"\" {\"}]"
 	drafts, err := ExtractDraftsWithError(text)

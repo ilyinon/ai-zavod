@@ -63,6 +63,32 @@ export type WorkflowStep = {
   error: string;
 };
 
+export type WorkflowPlan = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  workflowRunId: string;
+  title: string;
+  status: string;
+  currentStepId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowPlanStep = {
+  id: string;
+  planId: string;
+  stepKey: string;
+  title: string;
+  description: string;
+  agentId: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string;
+  error: string;
+  sortOrder: number;
+};
+
 export type Artifact = {
   id: string;
   projectId: string;
@@ -195,6 +221,32 @@ export type ReviewRun = {
   createdAt: string;
 };
 
+export type WebSource = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  workflowRunId: string;
+  agentId: string;
+  query: string;
+  title: string;
+  url: string;
+  snippet: string;
+  contentExcerpt: string;
+  sourceType: string;
+  trustLevel: string;
+  fetchedAt: string;
+  createdAt: string;
+};
+
+export type WebSettings = {
+  enabled: boolean;
+  maxResults: number;
+  maxPagesPerWorkflow: number;
+  timeoutSeconds: number;
+  allowedDomains: string[];
+  blockedDomains: string[];
+};
+
 export type ModelConfig = {
   id: string;
   name: string;
@@ -225,12 +277,15 @@ export type ProjectState = {
   messages: Message[];
   workflowRun?: WorkflowRun;
   workflowSteps: WorkflowStep[];
+  workflowPlan?: WorkflowPlan;
+  planSteps: WorkflowPlanStep[];
   artifacts: Artifact[];
   blueprint?: TaskBlueprint;
   clarification?: PendingClarification;
   changes: ProposedChange[];
   testRuns: TestRun[];
   reviews: ReviewRun[];
+  webSources: WebSource[];
 };
 
 export type ChatState = ProjectState & {
@@ -246,6 +301,7 @@ export type BootstrapState = {
   agents: AgentStatus[];
   models: ModelConfig[];
   activeModelId: string;
+  webSettings: WebSettings;
 };
 
 type WailsApp = {
@@ -264,6 +320,7 @@ type WailsApp = {
   SaveModelConfig(input: ModelConfig): Promise<ModelConfig[]>;
   SetActiveModel(modelId: string): Promise<ModelConfig[]>;
   CheckModel(modelId: string): Promise<ModelConfig[]>;
+  SaveWebSettings(input: WebSettings): Promise<WebSettings>;
 };
 
 declare global {
@@ -305,6 +362,7 @@ export const backend = {
   saveModelConfig: (model: ModelConfig) => app().SaveModelConfig(model),
   setActiveModel: (modelId: string) => app().SetActiveModel(modelId),
   checkModel: (modelId: string) => app().CheckModel(modelId),
+  saveWebSettings: (settings: WebSettings) => app().SaveWebSettings(settings),
   onAgentStatusChanged: (callback: (status: AgentStatus) => void) =>
     subscribe('agent_status_changed', (data) => callback(data as AgentStatus)),
   onChatStateChanged: (callback: (state: ChatState) => void) =>
