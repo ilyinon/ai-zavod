@@ -177,8 +177,8 @@ open "/Applications/Zavod AI.app"
 1. Устанавливает Go и Node.js.
 2. Устанавливает Wails CLI.
 3. Ставит frontend dependencies.
-4. Запускает `go test ./...`.
-5. Запускает `npm run build --prefix frontend`.
+4. Запускает `npm run build --prefix frontend`.
+5. Запускает `go test ./...`.
 6. Собирает macOS-приложение через `wails build`.
 7. Упаковывает `build/bin/Zavod AI.app` в `.dmg`.
 8. Загружает `.dmg` как GitHub Actions artifact.
@@ -220,12 +220,14 @@ wails dev
 Полная локальная проверка перед коммитом:
 
 ```bash
-go test ./...
 cd frontend
 npm run build
 cd ..
+go test ./...
 wails build
 ```
+
+На чистом checkout `go test ./...` нужно запускать после frontend build, потому что `main.go` встраивает `frontend/dist` через Go embed.
 
 ## Структура проекта
 
