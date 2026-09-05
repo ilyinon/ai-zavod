@@ -15,7 +15,10 @@ type Request struct {
 }
 
 type Response struct {
-	Content string `json:"content"`
+	Content      string `json:"content"`
+	InputTokens  int    `json:"inputTokens"`
+	OutputTokens int    `json:"outputTokens"`
+	TotalTokens  int    `json:"totalTokens"`
 }
 
 type Event struct {

@@ -16,6 +16,7 @@ type AgentLibraryItemDTO struct {
 	Category      string   `json:"category"`
 	Description   string   `json:"description"`
 	ToolProfileID string   `json:"toolProfileId"`
+	DefaultSkills []string `json:"defaultSkills"`
 	Capabilities  []string `json:"capabilities"`
 	AllowedTools  []string `json:"allowedTools"`
 	ReadPaths     []string `json:"readPaths"`
@@ -47,6 +48,7 @@ type libraryAgent struct {
 	Category      string
 	Description   string
 	ToolProfileID string
+	DefaultSkills []string
 	Capabilities  []string
 	AllowedTools  []string
 	ReadPaths     []string
@@ -66,6 +68,7 @@ func (s *Service) ListAgentLibrary(ctx context.Context) ([]AgentLibraryItemDTO, 
 			RoleKey:       item.RoleKey,
 			Description:   item.Description,
 			ToolProfileID: item.ToolProfileID,
+			DefaultSkills: item.DefaultSkills,
 			Capabilities:  item.Capabilities,
 			AllowedTools:  item.AllowedTools,
 			ReadPaths:     item.ReadPaths,
@@ -79,6 +82,7 @@ func (s *Service) ListAgentLibrary(ctx context.Context) ([]AgentLibraryItemDTO, 
 			Category:      item.Category,
 			Description:   item.Description,
 			ToolProfileID: item.ToolProfileID,
+			DefaultSkills: profile.DefaultSkills,
 			Capabilities:  profile.Capabilities,
 			AllowedTools:  profile.AllowedTools,
 			ReadPaths:     profile.ReadPaths,
@@ -125,6 +129,7 @@ func (s *Service) AddAgentFromLibrary(ctx context.Context, input AddAgentFromLib
 		Description:   item.Description,
 		ModelID:       modelID,
 		ToolProfileID: item.ToolProfileID,
+		DefaultSkills: item.DefaultSkills,
 		Capabilities:  item.Capabilities,
 		AllowedTools:  item.AllowedTools,
 		ReadPaths:     item.ReadPaths,
@@ -194,6 +199,7 @@ func (s *Service) ReplaceAgentSoulFromLibrary(ctx context.Context, input Replace
 		profile.WritePaths = item.WritePaths
 		profile.HandoffRules = item.HandoffRules
 		profile.ToolProfileID = item.ToolProfileID
+		profile.DefaultSkills = item.DefaultSkills
 		saved, err := s.store.SaveAgentProfile(ctx, profile)
 		if err != nil {
 			return AgentSoulDTO{}, err

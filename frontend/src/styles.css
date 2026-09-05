@@ -625,7 +625,7 @@ code {
 }
 
 .agent-activity-panel.with-workflow {
-  grid-template-columns: minmax(300px, 0.95fr) minmax(300px, 1fr) minmax(220px, 280px);
+  grid-template-columns: minmax(280px, 0.9fr) minmax(250px, 0.8fr) minmax(300px, 1fr) minmax(220px, 280px);
 }
 
 .agent-activity-panel.without-workflow {
@@ -849,6 +849,125 @@ code {
 
 .agent-popover-grid dd {
   color: #263747;
+}
+
+.agent-runtime-dashboard {
+  display: grid;
+  min-width: 0;
+  height: 116px;
+  min-height: 0;
+  gap: 8px;
+  border: 1px solid #d8e0e7;
+  border-left: 4px solid #6f8796;
+  border-radius: 12px;
+  background: #fbfcfd;
+  padding: 11px 12px;
+  box-shadow: 0 8px 20px rgba(23, 32, 42, 0.07);
+}
+
+.agent-runtime-dashboard.thinking,
+.agent-runtime-dashboard.calling_model,
+.agent-runtime-dashboard.answering,
+.agent-runtime-dashboard.writing_files,
+.agent-runtime-dashboard.running,
+.agent-runtime-dashboard.searching_web {
+  border-left-color: #c89416;
+  background: #fffaf0;
+}
+
+.agent-runtime-dashboard.waiting_user,
+.agent-runtime-dashboard.needs_work {
+  border-left-color: #d36b1f;
+  background: #fff7ef;
+}
+
+.agent-runtime-dashboard.failed,
+.agent-runtime-dashboard.blocked {
+  border-left-color: #b13a3a;
+  background: #fff5f5;
+}
+
+.agent-runtime-dashboard.idle,
+.agent-runtime-dashboard.done {
+  border-left-color: #21845b;
+}
+
+.runtime-dashboard-head {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.runtime-dashboard-head div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.runtime-dashboard-head span:first-child {
+  color: #667482;
+  font-size: 11px;
+  font-weight: 820;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.runtime-dashboard-head strong {
+  overflow: hidden;
+  color: #17202a;
+  font-size: 14px;
+  font-weight: 780;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-dashboard-grid {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 44px minmax(0, 0.8fr);
+  gap: 4px 8px;
+  margin: 0;
+}
+
+.runtime-dashboard-grid dt,
+.runtime-dashboard-grid dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.runtime-dashboard-grid dt {
+  color: #667482;
+  font-weight: 740;
+}
+
+.runtime-dashboard-grid dd {
+  overflow: hidden;
+  color: #263747;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-dashboard-footer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.runtime-dashboard-footer span {
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #526576;
+  font-size: 11px;
+  font-weight: 720;
+  padding: 4px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-status-dot {
@@ -2500,6 +2619,7 @@ code {
   margin-top: 8px;
 }
 
+.agent-skill-chip,
 .agent-capability-chip {
   display: inline-flex;
   align-items: center;
@@ -2515,6 +2635,11 @@ code {
   font-size: 11px;
   font-weight: 700;
   line-height: 1.2;
+}
+
+.agent-skill-chip {
+  background: #eef7ff;
+  color: #245e78;
 }
 
 .agent-capability-chip.muted-chip {
@@ -2541,6 +2666,35 @@ code {
 .agent-capabilities-editor {
   display: grid;
   gap: 8px;
+}
+
+.agent-skills-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-skill-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-skill-toggle {
+  min-height: 28px;
+  border: 1px solid #cbd6df;
+  border-radius: 999px;
+  background: #fff;
+  color: #526170;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 720;
+  padding: 4px 9px;
+}
+
+.agent-skill-toggle.active {
+  border-color: #92cfe0;
+  background: #eef7ff;
+  color: #245e78;
 }
 
 .compact-textarea {
@@ -3804,6 +3958,17 @@ code {
 .run-review-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+@media (max-width: 1480px) {
+  .agent-activity-panel.with-workflow {
+    grid-template-columns: minmax(280px, 1fr) minmax(250px, 0.9fr) minmax(220px, 280px);
+    grid-auto-rows: 116px;
+  }
+
+  .workflow-compact {
+    grid-column: 1 / 3;
+  }
 }
 
 .apply-changes-button {

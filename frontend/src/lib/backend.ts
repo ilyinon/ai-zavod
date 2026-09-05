@@ -38,6 +38,14 @@ export type AgentStatus = {
   status: string;
   activity: string;
   modelId: string;
+  toolId: string;
+  soulPath: string;
+  stepKey: string;
+  startedAt: string;
+  elapsedMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
   updatedAt: string;
 };
 
@@ -71,6 +79,7 @@ export type AgentLibraryItem = {
   category: string;
   description: string;
   toolProfileId: string;
+  defaultSkills: string[];
   capabilities: string[];
   allowedTools: string[];
   readPaths: string[];
@@ -89,6 +98,7 @@ export type AgentProfile = {
   soulPath: string;
   modelId: string;
   toolProfileId: string;
+  defaultSkills: string[];
   capabilities: string[];
   allowedTools: string[];
   readPaths: string[];

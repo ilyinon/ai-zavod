@@ -896,6 +896,7 @@ function App() {
       soulPath: '',
       modelId: groupForm.defaultModelId || activeModelId,
       toolProfileId: '',
+      defaultSkills: ['pony-tail'],
       capabilities: [],
       allowedTools: [],
       readPaths: [],
@@ -1319,7 +1320,7 @@ function App() {
       <section className="chat-panel">
         <header className="chat-header">
           <div className="chat-title-area">
-            <AgentStrip agents={agents} run={workflowRun} steps={workflowSteps} activeModel={activeModel} />
+            <AgentStrip agents={agents} run={workflowRun} steps={workflowSteps} models={models} activeModel={activeModel} />
           </div>
           <div className="chat-header-actions">
             {pendingChanges.length > 0 && (
@@ -1691,6 +1692,11 @@ function App() {
                           <span>{item.roleKey}</span>
                           <p>{item.description}</p>
                           <div className="agent-capability-list">
+                            {(item.defaultSkills || []).slice(0, 4).map((skill) => (
+                              <span key={`library-skill-${item.id}-${skill}`} className="agent-skill-chip">
+                                ${skill.replace(/^\$/, '')}
+                              </span>
+                            ))}
                             {(item.tags || []).slice(0, 3).map((tag) => (
                               <span key={tag} className="agent-capability-chip muted-chip">
                                 {tag}
@@ -1866,6 +1872,11 @@ function App() {
                           <span>{profile.roleKey}</span>
                           {profile.description && <p>{profile.description}</p>}
                           <div className="agent-capability-list">
+                            {(profile.defaultSkills || []).slice(0, 4).map((skill) => (
+                              <span key={`skill-${skill}`} className="agent-skill-chip">
+                                ${skill.replace(/^\$/, '')}
+                              </span>
+                            ))}
                             {(profile.capabilities || []).slice(0, 3).map((capability) => (
                               <span key={capability} className="agent-capability-chip">
                                 {capability}
@@ -1876,6 +1887,7 @@ function App() {
                             )}
                           </div>
                           <div className="agent-access-meta">
+                            <span>skills {(profile.defaultSkills || []).length}</span>
                             <span>tools {(profile.allowedTools || []).length}</span>
                             <span>read {(profile.readPaths || []).length}</span>
                             <span>write {(profile.writePaths || []).length}</span>
@@ -1962,6 +1974,39 @@ function App() {
                         value={agentForm.description}
                         onChange={(event) => setAgentForm({ ...agentForm, description: event.target.value })}
                       />
+
+                      <div className="agent-skills-editor">
+                        <label className="field-label" htmlFor="agent-skills">
+                          Skills по умолчанию
+                        </label>
+                        <div className="agent-skill-presets" aria-label="Быстрые skills">
+                          {['pony-tail', 'dev', 'research', 'security', 'ctf'].map((skill) => {
+                            const enabled = (agentForm.defaultSkills || []).some((item) => normalizeSkillName(item) === skill);
+                            return (
+                              <button
+                                key={skill}
+                                className={`agent-skill-toggle ${enabled ? 'active' : ''}`}
+                                type="button"
+                                onClick={() =>
+                                  setAgentForm({
+                                    ...agentForm,
+                                    defaultSkills: toggleSkill(agentForm.defaultSkills || [], skill),
+                                  })
+                                }
+                              >
+                                ${skill}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <textarea
+                          id="agent-skills"
+                          className="input textarea compact-textarea"
+                          value={listToLines(agentForm.defaultSkills || [])}
+                          placeholder="pony-tail&#10;security&#10;research"
+                          onChange={(event) => setAgentForm({ ...agentForm, defaultSkills: linesToList(event.target.value).map(normalizeSkillName) })}
+                        />
+                      </div>
 
                       <div className="agent-capabilities-editor">
                         <label className="field-label" htmlFor="agent-capabilities">
@@ -2641,11 +2686,13 @@ function AgentStrip({
   agents,
   run,
   steps,
+  models,
   activeModel,
 }: {
   agents: AgentStatus[];
   run?: WorkflowRun | null;
   steps: WorkflowStep[];
+  models: ModelConfig[];
   activeModel?: ModelConfig | null;
 }) {
   if (agents.length === 0) {
@@ -2656,6 +2703,7 @@ function AgentStrip({
   const activeStatus = statusLabels[activeAgent.status] ?? activeAgent.status;
   const activeActivity = activeAgent.activity || defaultAgentActivity(activeAgent);
   const activeAgentInfo = agentInfoById(activeAgent.id);
+  const runtimeModel = models.find((model) => model.id === activeAgent.modelId) ?? activeModel ?? null;
 
   return (
     <div className="agent-activity-panel with-workflow" aria-label="Активность агентов">
@@ -2699,9 +2747,57 @@ function AgentStrip({
           </dl>
         </div>
       </div>
+      <AgentRuntimeDashboard agent={activeAgent} agents={agents} model={runtimeModel} />
       <WorkflowProgress agents={agents} run={run} steps={steps} />
       <ActiveModelCard model={activeModel} />
     </div>
+  );
+}
+
+function AgentRuntimeDashboard({
+  agent,
+  agents,
+  model,
+}: {
+  agent: AgentStatus;
+  agents: AgentStatus[];
+  model?: ModelConfig | null;
+}) {
+  const workingAgents = agents.filter((item) => isAgentRuntimeActive(item.status));
+  const waitingAgents = agents.filter((item) => ['waiting_user', 'needs_work', 'blocked', 'failed'].includes(item.status));
+  const elapsed = agent.elapsedMs > 0 ? formatDuration(agent.elapsedMs) : runtimeSince(agent.startedAt);
+  const tokens = agent.totalTokens > 0
+    ? `${agent.totalTokens} ток.`
+    : agent.inputTokens + agent.outputTokens > 0
+      ? `${agent.inputTokens + agent.outputTokens} ток.`
+      : 'нет данных';
+
+  return (
+    <section className={`agent-runtime-dashboard ${agent.status}`} aria-label="Runtime агента">
+      <div className="runtime-dashboard-head">
+        <div>
+          <span>Runtime</span>
+          <strong>{agent.stepKey ? workflowStepLabels[agent.stepKey] ?? agent.stepKey : 'ожидает шаг'}</strong>
+        </div>
+        <span className={`active-agent-status ${agent.status}`}>{statusLabels[agent.status] ?? agent.status}</span>
+      </div>
+      <dl className="runtime-dashboard-grid">
+        <dt>Model</dt>
+        <dd>{model?.name ?? agent.modelId ?? 'не выбрана'}</dd>
+        <dt>Tool</dt>
+        <dd>{agent.toolId || runtimeToolLabel(agent.status)}</dd>
+        <dt>Soul</dt>
+        <dd title={agent.soulPath}>{agent.soulPath ? compactPath(agent.soulPath) : 'default soul'}</dd>
+        <dt>Time</dt>
+        <dd>{elapsed || 'нет данных'}</dd>
+        <dt>Tokens</dt>
+        <dd>{tokens}</dd>
+      </dl>
+      <div className="runtime-dashboard-footer">
+        <span>{workingAgents.length > 0 ? `работают: ${workingAgents.length}` : 'никто не работает'}</span>
+        {waitingAgents.length > 0 && <span>ждут: {waitingAgents.length}</span>}
+      </div>
+    </section>
   );
 }
 
@@ -3215,6 +3311,66 @@ function defaultAgentActivity(agent: AgentStatus): string {
     return 'Ждет свою часть работы';
   }
   return statusLabels[agent.status] ?? agent.status;
+}
+
+function isAgentRuntimeActive(status: string): boolean {
+  return ['thinking', 'calling_model', 'answering', 'writing_files', 'running', 'searching_web'].includes(status);
+}
+
+function runtimeToolLabel(status: string): string {
+  if (status === 'calling_model' || status === 'thinking' || status === 'answering') {
+    return 'llm';
+  }
+  if (status === 'running' || status === 'writing_files') {
+    return 'runtime';
+  }
+  return 'нет';
+}
+
+function runtimeSince(startedAt: string): string {
+  if (!startedAt) {
+    return '';
+  }
+  const started = new Date(startedAt).getTime();
+  if (Number.isNaN(started)) {
+    return '';
+  }
+  return formatDuration(Math.max(0, Date.now() - started));
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return '';
+  }
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) {
+    return `${seconds} с`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest > 0 ? `${minutes} м ${rest} с` : `${minutes} м`;
+}
+
+function compactPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length <= 3) {
+    return normalized;
+  }
+  return `.../${parts.slice(-3).join('/')}`;
+}
+
+function normalizeSkillName(value: string): string {
+  return value.trim().replace(/^\$/, '').toLowerCase();
+}
+
+function toggleSkill(skills: string[], skill: string): string[] {
+  const normalized = normalizeSkillName(skill);
+  const current = skills.map(normalizeSkillName).filter(Boolean);
+  if (current.includes(normalized)) {
+    return current.filter((item) => item !== normalized);
+  }
+  return [...current, normalized];
 }
 
 function WorkflowProgress({ agents, run, steps }: WorkflowProgressProps) {

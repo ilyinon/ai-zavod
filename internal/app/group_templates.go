@@ -44,6 +44,7 @@ type templateProfile struct {
 	RoleKey       string
 	Description   string
 	ToolProfileID string
+	DefaultSkills []string
 	Temperature   float64
 	ContextBudget int
 	Enabled       bool
@@ -131,6 +132,7 @@ func (s *Service) CreateAgentGroupFromTemplate(ctx context.Context, input Create
 			Description:   profile.Description,
 			ModelID:       defaultModelID,
 			ToolProfileID: profile.ToolProfileID,
+			DefaultSkills: profile.DefaultSkills,
 			Temperature:   profile.Temperature,
 			ContextBudget: profile.ContextBudget,
 			Enabled:       profile.Enabled,

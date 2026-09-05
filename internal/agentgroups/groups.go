@@ -35,6 +35,7 @@ type Profile struct {
 	SoulPath      string   `json:"soulPath"`
 	ModelID       string   `json:"modelId"`
 	ToolProfileID string   `json:"toolProfileId"`
+	DefaultSkills []string `json:"defaultSkills"`
 	Capabilities  []string `json:"capabilities"`
 	AllowedTools  []string `json:"allowedTools"`
 	ReadPaths     []string `json:"readPaths"`

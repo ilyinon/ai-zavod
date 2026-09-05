@@ -353,6 +353,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			soul_path TEXT NOT NULL DEFAULT '',
 			model_id TEXT NOT NULL DEFAULT '',
 			tool_profile_id TEXT NOT NULL DEFAULT '',
+			skills_json TEXT NOT NULL DEFAULT '["pony-tail"]',
 			capabilities_json TEXT NOT NULL DEFAULT '[]',
 			allowed_tools_json TEXT NOT NULL DEFAULT '[]',
 			read_paths_json TEXT NOT NULL DEFAULT '[]',
@@ -465,6 +466,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	}{
 		{name: "capabilities_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{name: "allowed_tools_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{name: "skills_json", definition: "TEXT NOT NULL DEFAULT '[\"pony-tail\"]'"},
 		{name: "read_paths_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{name: "write_paths_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{name: "handoff_rules_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
@@ -2387,7 +2389,7 @@ func (s *Store) ArchiveAgentGroup(ctx context.Context, groupID string) error {
 func (s *Store) ListAgentProfiles(ctx context.Context, groupID string) ([]agentgroups.Profile, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, group_id, name, role_key, description, avatar_path, soul_path, model_id, tool_profile_id,
-			capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
+			skills_json, capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
 			temperature, context_budget, enabled, sort_order, created_at, updated_at
 		FROM agent_profiles
 		WHERE group_id = ?
@@ -2402,7 +2404,7 @@ func (s *Store) ListAgentProfiles(ctx context.Context, groupID string) ([]agentg
 	for rows.Next() {
 		var item agentgroups.Profile
 		var enabled int
-		var capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON string
+		var skillsJSON, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON string
 		if err := rows.Scan(
 			&item.ID,
 			&item.GroupID,
@@ -2413,6 +2415,7 @@ func (s *Store) ListAgentProfiles(ctx context.Context, groupID string) ([]agentg
 			&item.SoulPath,
 			&item.ModelID,
 			&item.ToolProfileID,
+			&skillsJSON,
 			&capabilitiesJSON,
 			&allowedToolsJSON,
 			&readPathsJSON,
@@ -2428,6 +2431,7 @@ func (s *Store) ListAgentProfiles(ctx context.Context, groupID string) ([]agentg
 			return nil, err
 		}
 		item.Enabled = enabled != 0
+		item.DefaultSkills = decodeStringList(skillsJSON)
 		item.Capabilities = decodeStringList(capabilitiesJSON)
 		item.AllowedTools = decodeStringList(allowedToolsJSON)
 		item.ReadPaths = decodeStringList(readPathsJSON)
@@ -2442,10 +2446,10 @@ func (s *Store) ListAgentProfiles(ctx context.Context, groupID string) ([]agentg
 func (s *Store) GetAgentProfile(ctx context.Context, profileID string) (agentgroups.Profile, error) {
 	var item agentgroups.Profile
 	var enabled int
-	var capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON string
+	var skillsJSON, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, group_id, name, role_key, description, avatar_path, soul_path, model_id, tool_profile_id,
-			capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
+			skills_json, capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
 			temperature, context_budget, enabled, sort_order, created_at, updated_at
 		FROM agent_profiles
 		WHERE id = ?
@@ -2459,6 +2463,7 @@ func (s *Store) GetAgentProfile(ctx context.Context, profileID string) (agentgro
 		&item.SoulPath,
 		&item.ModelID,
 		&item.ToolProfileID,
+		&skillsJSON,
 		&capabilitiesJSON,
 		&allowedToolsJSON,
 		&readPathsJSON,
@@ -2475,6 +2480,7 @@ func (s *Store) GetAgentProfile(ctx context.Context, profileID string) (agentgro
 		return agentgroups.Profile{}, err
 	}
 	item.Enabled = enabled != 0
+	item.DefaultSkills = decodeStringList(skillsJSON)
 	item.Capabilities = decodeStringList(capabilitiesJSON)
 	item.AllowedTools = decodeStringList(allowedToolsJSON)
 	item.ReadPaths = decodeStringList(readPathsJSON)
@@ -2495,6 +2501,7 @@ func (s *Store) SaveAgentProfile(ctx context.Context, profile agentgroups.Profil
 	profile.SoulPath = strings.TrimSpace(profile.SoulPath)
 	profile.ModelID = strings.TrimSpace(profile.ModelID)
 	profile.ToolProfileID = strings.TrimSpace(profile.ToolProfileID)
+	profile.DefaultSkills = agentgroups.NormalizeDefaultSkills(profile.DefaultSkills)
 	profile.Capabilities = cleanStringList(profile.Capabilities)
 	profile.AllowedTools = cleanStringList(profile.AllowedTools)
 	profile.ReadPaths = cleanStringList(profile.ReadPaths)
@@ -2518,6 +2525,7 @@ func (s *Store) SaveAgentProfile(ctx context.Context, profile agentgroups.Profil
 		profile.CreatedAt = now
 	}
 	profile.UpdatedAt = now
+	skillsJSON := marshalJSON(profile.DefaultSkills, "[]")
 	capabilitiesJSON := marshalJSON(profile.Capabilities, "[]")
 	allowedToolsJSON := marshalJSON(profile.AllowedTools, "[]")
 	readPathsJSON := marshalJSON(profile.ReadPaths, "[]")
@@ -2526,9 +2534,9 @@ func (s *Store) SaveAgentProfile(ctx context.Context, profile agentgroups.Profil
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_profiles
 			(id, group_id, name, role_key, description, avatar_path, soul_path, model_id, tool_profile_id,
-			 capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
+			 skills_json, capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
 			 temperature, context_budget, enabled, sort_order, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			role_key = excluded.role_key,
@@ -2537,6 +2545,7 @@ func (s *Store) SaveAgentProfile(ctx context.Context, profile agentgroups.Profil
 			soul_path = excluded.soul_path,
 			model_id = excluded.model_id,
 			tool_profile_id = excluded.tool_profile_id,
+			skills_json = excluded.skills_json,
 			capabilities_json = excluded.capabilities_json,
 			allowed_tools_json = excluded.allowed_tools_json,
 			read_paths_json = excluded.read_paths_json,
@@ -2547,7 +2556,7 @@ func (s *Store) SaveAgentProfile(ctx context.Context, profile agentgroups.Profil
 			enabled = excluded.enabled,
 			sort_order = excluded.sort_order,
 			updated_at = excluded.updated_at
-	`, profile.ID, profile.GroupID, profile.Name, profile.RoleKey, profile.Description, profile.AvatarPath, profile.SoulPath, profile.ModelID, profile.ToolProfileID, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON, profile.Temperature, profile.ContextBudget, boolInt(profile.Enabled), profile.SortOrder, profile.CreatedAt, profile.UpdatedAt)
+	`, profile.ID, profile.GroupID, profile.Name, profile.RoleKey, profile.Description, profile.AvatarPath, profile.SoulPath, profile.ModelID, profile.ToolProfileID, skillsJSON, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON, profile.Temperature, profile.ContextBudget, boolInt(profile.Enabled), profile.SortOrder, profile.CreatedAt, profile.UpdatedAt)
 	if err != nil {
 		return agentgroups.Profile{}, err
 	}
@@ -3019,6 +3028,7 @@ func (s *Store) ensureSeedGroup(ctx context.Context, group agentgroups.Group, pr
 		if profile.ContextBudget == 0 {
 			profile.ContextBudget = 8000
 		}
+		profile.DefaultSkills = agentgroups.NormalizeDefaultSkills(profile.DefaultSkills)
 		if profile.CreatedAt == "" {
 			profile.CreatedAt = group.CreatedAt
 		}
@@ -3026,6 +3036,7 @@ func (s *Store) ensureSeedGroup(ctx context.Context, group agentgroups.Group, pr
 			profile.UpdatedAt = group.UpdatedAt
 		}
 		profile = agentgroups.NormalizeCapabilities(profile)
+		skillsJSON := marshalJSON(profile.DefaultSkills, "[]")
 		capabilitiesJSON := marshalJSON(profile.Capabilities, "[]")
 		allowedToolsJSON := marshalJSON(profile.AllowedTools, "[]")
 		readPathsJSON := marshalJSON(profile.ReadPaths, "[]")
@@ -3034,21 +3045,22 @@ func (s *Store) ensureSeedGroup(ctx context.Context, group agentgroups.Group, pr
 		if _, err := tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO agent_profiles
 				(id, group_id, name, role_key, description, avatar_path, soul_path, model_id, tool_profile_id,
-				 capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
+				 skills_json, capabilities_json, allowed_tools_json, read_paths_json, write_paths_json, handoff_rules_json,
 				 temperature, context_budget, enabled, sort_order, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, profile.ID, profile.GroupID, profile.Name, profile.RoleKey, profile.Description, profile.AvatarPath, profile.SoulPath, profile.ModelID, profile.ToolProfileID, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON, profile.Temperature, profile.ContextBudget, boolInt(profile.Enabled), index, profile.CreatedAt, profile.UpdatedAt); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, profile.ID, profile.GroupID, profile.Name, profile.RoleKey, profile.Description, profile.AvatarPath, profile.SoulPath, profile.ModelID, profile.ToolProfileID, skillsJSON, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON, profile.Temperature, profile.ContextBudget, boolInt(profile.Enabled), index, profile.CreatedAt, profile.UpdatedAt); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE agent_profiles
-			SET capabilities_json = CASE WHEN capabilities_json = '[]' THEN ? ELSE capabilities_json END,
+			SET skills_json = CASE WHEN skills_json = '[]' THEN ? ELSE skills_json END,
+				capabilities_json = CASE WHEN capabilities_json = '[]' THEN ? ELSE capabilities_json END,
 				allowed_tools_json = CASE WHEN allowed_tools_json = '[]' THEN ? ELSE allowed_tools_json END,
 				read_paths_json = CASE WHEN read_paths_json = '[]' THEN ? ELSE read_paths_json END,
 				write_paths_json = CASE WHEN write_paths_json = '[]' THEN ? ELSE write_paths_json END,
 				handoff_rules_json = CASE WHEN handoff_rules_json = '[]' THEN ? ELSE handoff_rules_json END
 			WHERE id = ?
-		`, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON, profile.ID); err != nil {
+		`, skillsJSON, capabilitiesJSON, allowedToolsJSON, readPathsJSON, writePathsJSON, handoffRulesJSON, profile.ID); err != nil {
 			return err
 		}
 	}

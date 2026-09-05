@@ -68,13 +68,21 @@ const (
 )
 
 type Status struct {
-	ID        string `json:"id"`
-	Role      string `json:"role"`
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-	Activity  string `json:"activity"`
-	ModelID   string `json:"modelId"`
-	UpdatedAt string `json:"updatedAt"`
+	ID           string `json:"id"`
+	Role         string `json:"role"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Activity     string `json:"activity"`
+	ModelID      string `json:"modelId"`
+	ToolID       string `json:"toolId"`
+	SoulPath     string `json:"soulPath"`
+	StepKey      string `json:"stepKey"`
+	StartedAt    string `json:"startedAt"`
+	ElapsedMS    int64  `json:"elapsedMs"`
+	InputTokens  int    `json:"inputTokens"`
+	OutputTokens int    `json:"outputTokens"`
+	TotalTokens  int    `json:"totalTokens"`
+	UpdatedAt    string `json:"updatedAt"`
 }
 
 type Spec struct {

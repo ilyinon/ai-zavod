@@ -83,7 +83,12 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 	if content == "" {
 		return nil, fmt.Errorf("model api вернул пустой ответ")
 	}
-	return &llm.Response{Content: content}, nil
+	return &llm.Response{
+		Content:      content,
+		InputTokens:  decoded.Usage.PromptTokens,
+		OutputTokens: decoded.Usage.CompletionTokens,
+		TotalTokens:  decoded.Usage.TotalTokens,
+	}, nil
 }
 
 func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event, error) {
@@ -292,6 +297,11 @@ type chatCompletionResponse struct {
 	Choices []struct {
 		Message apiMessage `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
 type streamCompletionResponse struct {

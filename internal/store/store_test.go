@@ -74,6 +74,13 @@ func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
 	if len(profiles[0].Capabilities) == 0 || len(profiles[0].AllowedTools) == 0 || len(profiles[0].HandoffRules) == 0 {
 		t.Fatalf("expected seeded dev profile capabilities, got %#v", profiles[0])
 	}
+	devSkills := map[string]bool{}
+	for _, skill := range profiles[0].DefaultSkills {
+		devSkills[skill] = true
+	}
+	if !devSkills["pony-tail"] {
+		t.Fatalf("expected seeded profile to include pony-tail skill, got %#v", profiles[0].DefaultSkills)
+	}
 	ctfProfiles, err := s.ListAgentProfiles(ctx, ctfGroup.ID)
 	if err != nil {
 		t.Fatalf("list ctf profiles: %v", err)
@@ -90,6 +97,9 @@ func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
 	for _, profile := range ctfProfiles {
 		if strings.HasPrefix(profile.RoleKey, "ctf_") && (len(profile.Capabilities) == 0 || len(profile.ReadPaths) == 0 || len(profile.WritePaths) == 0) {
 			t.Fatalf("expected CTF profile capability contract, got %#v", profile)
+		}
+		if strings.HasPrefix(profile.RoleKey, "ctf_") && !containsString(profile.DefaultSkills, "ctf") {
+			t.Fatalf("expected CTF profile to include ctf skill, got %#v", profile.DefaultSkills)
 		}
 	}
 	for profileID, want := range map[string]string{
@@ -170,6 +180,7 @@ func TestStorePersistsAgentProfileCapabilities(t *testing.T) {
 		GroupID:       group.ID,
 		Name:          "Специалист",
 		RoleKey:       "security",
+		DefaultSkills: []string{"pony-tail", "$security", "Security"},
 		Capabilities:  []string{"scope review", "scope review", "risk notes"},
 		AllowedTools:  []string{"web_search", "fetch_url"},
 		ReadPaths:     []string{"docs/**", "README*"},
@@ -188,6 +199,9 @@ func TestStorePersistsAgentProfileCapabilities(t *testing.T) {
 	}
 	if len(got.Capabilities) != 2 || got.Capabilities[0] != "scope review" || got.Capabilities[1] != "risk notes" {
 		t.Fatalf("unexpected capabilities: %#v", got.Capabilities)
+	}
+	if strings.Join(got.DefaultSkills, ",") != "pony-tail,security" {
+		t.Fatalf("unexpected default skills: %#v", got.DefaultSkills)
 	}
 	if strings.Join(got.AllowedTools, ",") != "web_search,fetch_url" {
 		t.Fatalf("unexpected tools: %#v", got.AllowedTools)
@@ -644,4 +658,13 @@ func TestStorePersistsV01Entities(t *testing.T) {
 		reviewRuns[0].RequiredChanges[0] != "добавить обработку non-2xx" {
 		t.Fatalf("expected persisted review run, got %#v", reviewRuns)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

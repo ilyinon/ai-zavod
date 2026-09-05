@@ -245,6 +245,7 @@ type SaveAgentProfileInput struct {
 	SoulPath      string   `json:"soulPath"`
 	ModelID       string   `json:"modelId"`
 	ToolProfileID string   `json:"toolProfileId"`
+	DefaultSkills []string `json:"defaultSkills"`
 	Capabilities  []string `json:"capabilities"`
 	AllowedTools  []string `json:"allowedTools"`
 	ReadPaths     []string `json:"readPaths"`
@@ -2944,6 +2945,7 @@ func (s *Service) SaveAgentProfile(ctx context.Context, input SaveAgentProfileIn
 		SoulPath:      input.SoulPath,
 		ModelID:       input.ModelID,
 		ToolProfileID: input.ToolProfileID,
+		DefaultSkills: input.DefaultSkills,
 		Capabilities:  input.Capabilities,
 		AllowedTools:  input.AllowedTools,
 		ReadPaths:     input.ReadPaths,
@@ -3173,13 +3175,18 @@ func (s *Service) ensureSoulFile(ctx context.Context, profile agentgroups.Profil
 }
 
 func (s *Service) agentSoulForStep(ctx context.Context, projectID string, spec agents.Spec) string {
+	content, _, _ := s.agentRuntimeContextForStep(ctx, projectID, spec)
+	return content
+}
+
+func (s *Service) agentRuntimeContextForStep(ctx context.Context, projectID string, spec agents.Spec) (string, string, string) {
 	binding, err := s.store.ProjectGroupBinding(ctx, projectID)
 	if err != nil {
-		return defaultSoulForSpec(spec)
+		return defaultSoulForSpec(spec), "", ""
 	}
 	profiles, err := s.store.ListAgentProfiles(ctx, binding.GroupID)
 	if err != nil {
-		return defaultSoulForSpec(spec)
+		return defaultSoulForSpec(spec), "", ""
 	}
 	for _, profile := range profiles {
 		if !profile.Enabled {
@@ -3190,15 +3197,50 @@ func (s *Service) agentSoulForStep(ctx context.Context, projectID string, spec a
 		}
 		path, err := s.ensureSoulFile(ctx, profile)
 		if err != nil {
-			return defaultSoulForSpec(spec)
+			return defaultSoulForSpec(spec), "", profile.ToolProfileID
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {
-			return defaultSoulForSpec(spec)
+			return defaultSoulForSpec(spec), path, profile.ToolProfileID
 		}
-		return strings.TrimSpace(string(content) + "\n\n" + agentCapabilityContract(profile))
+		return strings.TrimSpace(string(content) + "\n\n" + agentSkillsContract(profile) + "\n\n" + agentCapabilityContract(profile)), path, profile.ToolProfileID
 	}
-	return defaultSoulForSpec(spec)
+	return defaultSoulForSpec(spec), "", ""
+}
+
+func agentSkillsContract(profile agentgroups.Profile) string {
+	skills := agentgroups.NormalizeDefaultSkills(profile.DefaultSkills)
+	if len(skills) == 0 {
+		skills = agentgroups.DefaultSkillsForRole(profile.RoleKey)
+	}
+	var builder strings.Builder
+	builder.WriteString("# Default Skills\n\n")
+	builder.WriteString("Эти skills подключены к агенту по умолчанию. Используй их как постоянный рабочий режим, если пользователь явно не выбрал другой skill.\n\n")
+	for _, skill := range skills {
+		builder.WriteString("- $")
+		builder.WriteString(skill)
+		builder.WriteString(": ")
+		builder.WriteString(skillPurpose(skill))
+		builder.WriteString("\n")
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func skillPurpose(skill string) string {
+	switch strings.ToLower(strings.TrimPrefix(skill, "$")) {
+	case "pony-tail":
+		return "ясный spec-driven стиль, аккуратные изменения, короткий полезный вывод"
+	case "security":
+		return "безопасный анализ угроз, scope, defensive рекомендации и guardrails"
+	case "research":
+		return "поиск, проверка свежести источников, ссылки и аналитическая выжимка"
+	case "ctf":
+		return "CTF reasoning, гипотезы, evidence, solver scripts и writeup"
+	case "dev":
+		return "разработка, тесты, review, workspace hygiene и controlled changes"
+	default:
+		return "кастомный skill агента"
+	}
 }
 
 func agentCapabilityContract(profile agentgroups.Profile) string {
@@ -3820,21 +3862,31 @@ func (s *Service) runWorkflowStepWithSpec(
 	s.emitWorkflowStep(*run, step)
 	s.emitChatState(ctx, projectID, "")
 
-	s.setAgentStatus(spec.ID, "thinking", stepThinkingActivity(stepKey), model.ID)
-	s.setAgentStatus(spec.ID, "calling_model", "Отправляет шаг в "+model.Name, model.ID)
+	soul, soulPath, toolID := s.agentRuntimeContextForStep(ctx, projectID, spec)
+	runtime := agentRuntimeStatusUpdate{
+		ToolID:   toolID,
+		SoulPath: soulPath,
+		StepKey:  stepKey,
+	}
+	s.setAgentRuntimeStatus(spec.ID, "thinking", stepThinkingActivity(stepKey), model.ID, runtime)
+	s.setAgentRuntimeStatus(spec.ID, "calling_model", "Отправляет шаг в "+model.Name, model.ID, runtime)
 
 	stepCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	soul := s.agentSoulForStep(ctx, projectID, spec)
 	resp, err := provider.Generate(stepCtx, agents.RequestForSpecWithSoul(model.ModelName, spec, soul, input))
+	if resp != nil {
+		runtime.InputTokens = resp.InputTokens
+		runtime.OutputTokens = resp.OutputTokens
+		runtime.TotalTokens = resp.TotalTokens
+	}
 	if err != nil {
 		failed, finishErr := s.store.FinishWorkflowStep(ctx, step.ID, zw.StepStatusFailed, "", err.Error())
 		if finishErr == nil {
 			s.emitWorkflowStep(*run, failed)
 		}
 		_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusFailed, err.Error())
-		s.setAgentStatus(spec.ID, "failed", "Ошибка вызова модели", model.ID)
+		s.setAgentRuntimeStatus(spec.ID, "failed", "Ошибка вызова модели", model.ID, runtime)
 		return "", err
 	}
 
@@ -3846,7 +3898,7 @@ func (s *Service) runWorkflowStepWithSpec(
 			s.emitWorkflowStep(*run, failed)
 		}
 		_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusFailed, err.Error())
-		s.setAgentStatus(spec.ID, "failed", "Пустой ответ модели", model.ID)
+		s.setAgentRuntimeStatus(spec.ID, "failed", "Пустой ответ модели", model.ID, runtime)
 		return "", err
 	}
 	if len(output) > managerMaxAnswerBytes || looksLikeRepetitionLoop(output) {
@@ -3856,19 +3908,19 @@ func (s *Service) runWorkflowStepWithSpec(
 			s.emitWorkflowStep(*run, failed)
 		}
 		_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusFailed, err.Error())
-		s.setAgentStatus(spec.ID, "failed", "Ответ модели остановлен", model.ID)
+		s.setAgentRuntimeStatus(spec.ID, "failed", "Ответ модели остановлен", model.ID, runtime)
 		return "", err
 	}
 
-	s.setAgentStatus(spec.ID, "answering", "Сохраняет результат шага", model.ID)
+	s.setAgentRuntimeStatus(spec.ID, "answering", "Сохраняет результат шага", model.ID, runtime)
 	done, err := s.store.FinishWorkflowStep(ctx, step.ID, zw.StepStatusDone, output, "")
 	if err != nil {
-		s.setAgentStatus(spec.ID, "failed", "Не удалось сохранить шаг", model.ID)
+		s.setAgentRuntimeStatus(spec.ID, "failed", "Не удалось сохранить шаг", model.ID, runtime)
 		return "", err
 	}
 	s.emitWorkflowStep(*run, done)
 	_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID, zw.StepStatusDone, "")
-	s.setAgentStatus(spec.ID, "done", stepDoneActivity(stepKey), model.ID)
+	s.setAgentRuntimeStatus(spec.ID, "done", stepDoneActivity(stepKey), model.ID, runtime)
 	s.emitChatState(ctx, projectID, "")
 	_ = taskID
 	return output, nil
@@ -4362,25 +4414,95 @@ func (s *Service) resetAgentStatuses(modelID string) {
 	}
 }
 
+type agentRuntimeStatusUpdate struct {
+	ToolID       string
+	SoulPath     string
+	StepKey      string
+	InputTokens  int
+	OutputTokens int
+	TotalTokens  int
+}
+
 func (s *Service) setAgentStatus(agentID string, status string, activity string, modelID string) {
+	s.setAgentRuntimeStatus(agentID, status, activity, modelID, agentRuntimeStatusUpdate{})
+}
+
+func (s *Service) setAgentRuntimeStatus(agentID string, status string, activity string, modelID string, update agentRuntimeStatusUpdate) {
 	role, name := agents.Describe(agentID)
+	now := nowString()
 	value := agents.Status{
-		ID:        agentID,
-		Role:      role,
-		Name:      name,
-		Status:    status,
-		Activity:  activity,
-		ModelID:   modelID,
-		UpdatedAt: nowString(),
+		ID:           agentID,
+		Role:         role,
+		Name:         name,
+		Status:       status,
+		Activity:     activity,
+		ModelID:      modelID,
+		ToolID:       update.ToolID,
+		SoulPath:     update.SoulPath,
+		StepKey:      update.StepKey,
+		InputTokens:  update.InputTokens,
+		OutputTokens: update.OutputTokens,
+		TotalTokens:  update.TotalTokens,
+		UpdatedAt:    now,
 	}
 
 	s.mu.Lock()
+	if previous, ok := s.agentStatuses[agentID]; ok {
+		if value.ToolID == "" {
+			value.ToolID = previous.ToolID
+		}
+		if value.SoulPath == "" {
+			value.SoulPath = previous.SoulPath
+		}
+		if value.StepKey == "" {
+			value.StepKey = previous.StepKey
+		}
+		if isActiveAgentStatus(status) && isActiveAgentStatus(previous.Status) {
+			value.StartedAt = previous.StartedAt
+		}
+	}
+	if isActiveAgentStatus(status) && value.StartedAt == "" {
+		value.StartedAt = now
+	}
+	value.ElapsedMS = elapsedMS(value.StartedAt, now)
+	if !isActiveAgentStatus(status) {
+		value.StartedAt = ""
+	}
 	s.agentStatuses[agentID] = value
 	s.mu.Unlock()
 
 	if s.sink != nil {
 		s.sink.Emit("agent_status_changed", value)
 	}
+}
+
+func isActiveAgentStatus(status string) bool {
+	switch status {
+	case "thinking", "calling_model", "answering", "writing_files", "running", "searching_web", "waiting_user", "needs_work":
+		return true
+	default:
+		return false
+	}
+}
+
+func elapsedMS(startedAt string, finishedAt string) int64 {
+	startedAt = strings.TrimSpace(startedAt)
+	finishedAt = strings.TrimSpace(finishedAt)
+	if startedAt == "" || finishedAt == "" {
+		return 0
+	}
+	start, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return 0
+	}
+	finish, err := time.Parse(time.RFC3339, finishedAt)
+	if err != nil {
+		return 0
+	}
+	if finish.Before(start) {
+		return 0
+	}
+	return finish.Sub(start).Milliseconds()
 }
 
 func (s *Service) handleModelError(ctx context.Context, projectID string, taskID string, runID string, modelID string, err error) ChatState {

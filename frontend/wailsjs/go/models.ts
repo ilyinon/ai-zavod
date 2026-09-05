@@ -112,6 +112,7 @@ export namespace agentgroups {
 	    soulPath: string;
 	    modelId: string;
 	    toolProfileId: string;
+	    defaultSkills: string[];
 	    capabilities: string[];
 	    allowedTools: string[];
 	    readPaths: string[];
@@ -139,6 +140,7 @@ export namespace agentgroups {
 	        this.soulPath = source["soulPath"];
 	        this.modelId = source["modelId"];
 	        this.toolProfileId = source["toolProfileId"];
+	        this.defaultSkills = source["defaultSkills"];
 	        this.capabilities = source["capabilities"];
 	        this.allowedTools = source["allowedTools"];
 	        this.readPaths = source["readPaths"];
@@ -188,6 +190,14 @@ export namespace agents {
 	    status: string;
 	    activity: string;
 	    modelId: string;
+	    toolId: string;
+	    soulPath: string;
+	    stepKey: string;
+	    startedAt: string;
+	    elapsedMs: number;
+	    inputTokens: number;
+	    outputTokens: number;
+	    totalTokens: number;
 	    updatedAt: string;
 	
 	    static createFrom(source: any = {}) {
@@ -202,6 +212,14 @@ export namespace agents {
 	        this.status = source["status"];
 	        this.activity = source["activity"];
 	        this.modelId = source["modelId"];
+	        this.toolId = source["toolId"];
+	        this.soulPath = source["soulPath"];
+	        this.stepKey = source["stepKey"];
+	        this.startedAt = source["startedAt"];
+	        this.elapsedMs = source["elapsedMs"];
+	        this.inputTokens = source["inputTokens"];
+	        this.outputTokens = source["outputTokens"];
+	        this.totalTokens = source["totalTokens"];
 	        this.updatedAt = source["updatedAt"];
 	    }
 	}
@@ -273,6 +291,7 @@ export namespace app {
 	    category: string;
 	    description: string;
 	    toolProfileId: string;
+	    defaultSkills: string[];
 	    capabilities: string[];
 	    allowedTools: string[];
 	    readPaths: string[];
@@ -292,6 +311,7 @@ export namespace app {
 	        this.category = source["category"];
 	        this.description = source["description"];
 	        this.toolProfileId = source["toolProfileId"];
+	        this.defaultSkills = source["defaultSkills"];
 	        this.capabilities = source["capabilities"];
 	        this.allowedTools = source["allowedTools"];
 	        this.readPaths = source["readPaths"];
@@ -878,6 +898,7 @@ export namespace app {
 	    soulPath: string;
 	    modelId: string;
 	    toolProfileId: string;
+	    defaultSkills: string[];
 	    capabilities: string[];
 	    allowedTools: string[];
 	    readPaths: string[];
@@ -903,6 +924,7 @@ export namespace app {
 	        this.soulPath = source["soulPath"];
 	        this.modelId = source["modelId"];
 	        this.toolProfileId = source["toolProfileId"];
+	        this.defaultSkills = source["defaultSkills"];
 	        this.capabilities = source["capabilities"];
 	        this.allowedTools = source["allowedTools"];
 	        this.readPaths = source["readPaths"];

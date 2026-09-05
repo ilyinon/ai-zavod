@@ -366,6 +366,29 @@ CTF Cell должен выбирать инструменты по катего�
 - Можно увидеть retries и required/optional прямо на карточке.
 - Сохранение продолжает использовать старый backend contract, без новой несовместимой схемы.
 
+## V1.0.2 - Agent Runtime Dashboard
+
+### Цель
+
+Сделать runtime агентов наблюдаемым: пользователь должен видеть, кто сейчас работает, что делает, почему ждет, какая модель/tool/soul используются и сколько ресурсов ушло.
+
+### Фичи
+
+- Расширенный `AgentStatus` с `stepKey`, `toolId`, `soulPath`, `startedAt`, `elapsedMs`, `inputTokens`, `outputTokens`, `totalTokens`.
+- OpenAI-compatible provider читает `usage.prompt_tokens`, `usage.completion_tokens`, `usage.total_tokens`.
+- LLM workflow steps обновляют runtime context до и после model call.
+- Верхний Agent Runtime Dashboard рядом с карточкой активного агента.
+- Dashboard показывает step, model, tool, soul, elapsed time, tokens, active/waiting counters.
+- Unknown token usage отображается как `нет данных`.
+
+### Acceptance Criteria
+
+- Пользователь видит runtime dashboard без открытия настроек.
+- Можно понять, какой `soul.md` и какая модель использованы текущим агентом.
+- Можно отличить активную работу от ожидания пользователя.
+- Токены не подделываются, если provider не вернул usage.
+- Dashboard не заменяет agent popover, а дополняет его runtime-информацией.
+
 ## V0.7.0 - Task Memory & Spec Store
 
 ### Цель
@@ -782,6 +805,17 @@ CTF Cell должен выбирать инструменты по катего�
 - сделать команду/intent `выведи спеку этого задания`;
 - показывать пользователю только task artifacts, а служебные артефакты держать в `.zavod`;
 - добавить trace events и нормальный stop reason.
+
+## Implemented Follow-Ups
+
+### V1.0.3 - Skills per Agent
+
+- `AgentProfile` получил `defaultSkills`, persisted в SQLite как `skills_json`.
+- Backend нормализует `$skill`/`skill`, удаляет дубли и подставляет role-based defaults.
+- Prompt assembly добавляет per-agent блок `Default Skills` рядом с `soul.md` и capability contract.
+- UI показывает skill-чипы в карточках агентов и библиотеке.
+- Редактор агента позволяет включать быстрые skills `pony-tail`, `dev`, `research`, `security`, `ctf` и вводить кастомные строки.
+- Library/template flow переносит skills при создании группы, добавлении агента и замене контракта.
 
 ## References
 

@@ -303,6 +303,84 @@ Acceptance criteria:
 - runtime validation issues видны рядом с графом;
 - старый lifecycle editor остается совместимым и сохраняет те же `LifecycleStep`.
 
+## V1.0.2 - Agent Runtime Dashboard
+
+Верхняя панель должна показывать не только текущего агента, но и runtime-контекст: кто сейчас работает, что именно делает, почему ожидает, какая модель, tool profile и soul используются, сколько времени и токенов ушло.
+
+Source of truth:
+
+- runtime telemetry хранится в `agents.Status` и приходит через существующие `agent_status_changed` / `chat_state_changed`;
+- отдельная таблица telemetry в V1.0.2 не требуется;
+- LLM usage берется из OpenAI-compatible `usage`, если provider его вернул;
+- если provider не вернул usage, UI пишет `нет данных`, а не показывает выдуманные токены.
+
+Backend telemetry fields:
+
+- `stepKey` - текущий lifecycle/workflow step;
+- `modelId` - модель, с которой работает агент;
+- `toolId` - tool profile/runtime context, если известен;
+- `soulPath` - файл `soul.md`, использованный при prompt assembly;
+- `startedAt`, `elapsedMs` - время активной работы агента;
+- `inputTokens`, `outputTokens`, `totalTokens` - usage LLM-вызова.
+
+UI dashboard показывает:
+
+- активного runtime-агента;
+- текущий step;
+- model/tool/soul;
+- elapsed time;
+- token usage;
+- сколько агентов сейчас работают и сколько ждут пользователя/доработки.
+
+Acceptance criteria:
+
+- dashboard виден рядом с активным агентом;
+- при LLM-шаге отображается актуальная модель и `soul.md`;
+- после ответа модели отображаются токены, если provider прислал usage;
+- при ожидании пользователя видно, что агент ждет;
+- старый popover агента остается про роль/зачем/ответственность, а dashboard - про runtime.
+
+## V1.0.3 - Skills per Agent
+
+К каждому агенту можно подключить skills по умолчанию: например `pony-tail`, `security`, `research`, `ctf` или кастомный skill. Skills становятся частью `AgentProfile`, а не глобальной скрытой настройкой пайпа.
+
+Source of truth:
+
+- `AgentProfile.defaultSkills` - список skills агента;
+- `agent_profiles.skills_json` - persisted storage в SQLite;
+- `soul.md` отвечает за личность/стиль агента, `defaultSkills` отвечает за подключенные рабочие режимы;
+- prompt assembly добавляет отдельный блок `Default Skills` рядом с `soul.md` и capability contract.
+
+Нормализация:
+
+- `$pony-tail` и `pony-tail` считаются одним skill;
+- регистр не важен;
+- пустые строки и дубли удаляются;
+- если список пустой, backend подставляет role-based default.
+
+Role defaults:
+
+- manager/product/custom: `pony-tail`;
+- developer/tester/reviewer/architect/docs/release: `pony-tail`, `dev`;
+- researcher/source_reviewer/analyst: `pony-tail`, `research`;
+- security/threat_modeler/remediator: `pony-tail`, `security`;
+- CTF-роли: `pony-tail`, `ctf`.
+
+UI:
+
+- в карточке агента видны skill-чипы;
+- в редакторе агента есть быстрые переключатели `pony-tail`, `dev`, `research`, `security`, `ctf`;
+- можно вписать кастомные skills по одному на строку;
+- библиотека агентов показывает skills и переносит их при добавлении агента или замене контракта.
+
+Acceptance criteria:
+
+- skills сохраняются и восстанавливаются после перезапуска;
+- skills из библиотеки и шаблонов не теряются при создании/копировании/замене агента;
+- prompt конкретного агента содержит именно его default skills;
+- `$skill` в UI и API не создает дубль рядом с `skill`;
+- старые профили без `skills_json` автоматически получают дефолт по роли.
+
 ## Цель
 
 Локальное macOS desktop-приложение для управления AI-агентами через чат. Пользователь выбирает проект, пишет задачу, а входной агент "Люмен" принимает ее и отвечает через выбранную модель.

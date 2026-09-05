@@ -5,11 +5,15 @@ import "strings"
 // NormalizeCapabilities keeps custom profile fields intact and fills missing
 // contracts from stable role/tool defaults.
 func NormalizeCapabilities(profile Profile) Profile {
+	profile.DefaultSkills = NormalizeDefaultSkills(profile.DefaultSkills)
 	profile.Capabilities = cleanList(profile.Capabilities)
 	profile.AllowedTools = cleanList(profile.AllowedTools)
 	profile.ReadPaths = cleanList(profile.ReadPaths)
 	profile.WritePaths = cleanList(profile.WritePaths)
 	profile.HandoffRules = cleanList(profile.HandoffRules)
+	if len(profile.DefaultSkills) == 0 {
+		profile.DefaultSkills = DefaultSkillsForRole(profile.RoleKey)
+	}
 	if len(profile.Capabilities) == 0 {
 		profile.Capabilities = defaultCapabilities(profile.RoleKey)
 	}
@@ -26,6 +30,39 @@ func NormalizeCapabilities(profile Profile) Profile {
 		profile.HandoffRules = defaultHandoffRules(profile.RoleKey)
 	}
 	return profile
+}
+
+func NormalizeDefaultSkills(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "$"))
+		if value == "" {
+			continue
+		}
+		value = strings.ToLower(value)
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func DefaultSkillsForRole(roleKey string) []string {
+	skills := []string{"pony-tail"}
+	switch normalizedRole(roleKey) {
+	case "researcher", "source_reviewer", "analyst":
+		skills = append(skills, "research")
+	case "security", "threat_modeler", "remediator":
+		skills = append(skills, "security")
+	case "ctf_scout", "ctf_web", "ctf_lfi", "ctf_rce", "ctf_sqli", "ctf_pwn", "ctf_crypto", "ctf_reverse", "ctf_forensics", "ctf_validator":
+		skills = append(skills, "ctf")
+	case "developer", "tester", "reviewer", "architect", "docs", "release":
+		skills = append(skills, "dev")
+	}
+	return skills
 }
 
 func defaultCapabilities(roleKey string) []string {
