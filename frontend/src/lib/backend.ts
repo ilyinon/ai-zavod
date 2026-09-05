@@ -140,6 +140,12 @@ export type LifecycleStep = {
   sortOrder: number;
 };
 
+export type LifecycleRuntimeIssue = {
+  stepKey: string;
+  field: string;
+  message: string;
+};
+
 export type ProjectGroupBinding = {
   id: string;
   projectId: string;
@@ -544,6 +550,7 @@ type WailsApp = {
   SaveAgentSoul(input: { profileId: string; content: string }): Promise<AgentSoul>;
   ListLifecycleDefinitions(groupId: string): Promise<LifecycleDefinition[]>;
   ListLifecycleSteps(lifecycleId: string): Promise<LifecycleStep[]>;
+  ValidateLifecycleRuntime(lifecycleId: string): Promise<LifecycleRuntimeIssue[]>;
   SaveLifecycleDefinition(input: {
     id: string;
     groupId: string;
@@ -636,6 +643,7 @@ export const backend = {
   saveAgentSoul: (profileId: string, content: string) => app().SaveAgentSoul({ profileId, content }),
   listLifecycleDefinitions: (groupId: string) => app().ListLifecycleDefinitions(groupId),
   listLifecycleSteps: (lifecycleId: string) => app().ListLifecycleSteps(lifecycleId),
+  validateLifecycleRuntime: (lifecycleId: string) => app().ValidateLifecycleRuntime(lifecycleId),
   saveLifecycleDefinition: (input: {
     id: string;
     groupId: string;

@@ -371,6 +371,7 @@ type AgentGroupDTO = agentgroups.Group
 type AgentProfileDTO = agentgroups.Profile
 type LifecycleDefinitionDTO = agentgroups.LifecycleDefinition
 type LifecycleStepDTO = agentgroups.LifecycleStep
+type LifecycleRuntimeIssueDTO = lifecycler.ValidationIssue
 type ProjectGroupBindingDTO = agentgroups.ProjectBinding
 
 func NewService(ctx context.Context, sink EventSink) (*Service, error) {
@@ -724,11 +725,12 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		return s.handleWorkflowError(ctx, input.ProjectID, task.ID, run.ID, run.CurrentStep, model.ID, err), nil
 	}
 	if result.NeedsClarification {
-		if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusWaitingUser, zw.StepManagerIntake, ""); err != nil {
+		clarificationStep := firstNonEmpty(result.ClarificationStep, zw.StepManagerIntake)
+		if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusWaitingUser, clarificationStep, ""); err != nil {
 			return ChatState{}, err
 		}
 		run.Status = zw.StatusWaitingUser
-		run.CurrentStep = zw.StepManagerIntake
+		run.CurrentStep = clarificationStep
 		run.FinishedAt = nowString()
 		s.emitWorkflowRun(run)
 		s.setAgentStatus(agents.ManagerID, "waiting_user", "Ждет уточнение пользователя", model.ID)
@@ -1023,6 +1025,26 @@ func lifecycleStepDescription(step agentgroups.LifecycleStep, profile agentgroup
 	}
 	if step.Mode != "" {
 		parts = append(parts, step.Mode)
+	}
+	if cfg, err := lifecycler.ParseStepRuntimeConfig(step.OutputSchema); err == nil {
+		if len(cfg.Conditions) > 0 || cfg.Condition.Field != "" || cfg.Condition.Operator != "" {
+			parts = append(parts, "condition")
+		}
+		if len(cfg.Branches) > 0 {
+			parts = append(parts, fmt.Sprintf("branches %d", len(cfg.Branches)))
+		}
+		if len(cfg.ParallelSteps) > 0 {
+			parts = append(parts, fmt.Sprintf("parallel %d", len(cfg.ParallelSteps)))
+		}
+		if cfg.JoinStepKey != "" {
+			parts = append(parts, "join: "+cfg.JoinStepKey)
+		}
+		if cfg.ReturnToStepKey != "" {
+			parts = append(parts, "return: "+cfg.ReturnToStepKey)
+		}
+		if len(cfg.CompletionRules) > 0 {
+			parts = append(parts, "completion")
+		}
 	}
 	if step.CanRetry {
 		parts = append(parts, fmt.Sprintf("retries %d", step.MaxRetries))
@@ -3024,6 +3046,19 @@ func (s *Service) ListLifecycleSteps(ctx context.Context, lifecycleID string) ([
 	return s.store.ListLifecycleSteps(ctx, lifecycleID)
 }
 
+func (s *Service) ValidateLifecycleRuntime(ctx context.Context, lifecycleID string) ([]LifecycleRuntimeIssueDTO, error) {
+	definition, err := s.store.GetLifecycleDefinition(ctx, lifecycleID)
+	if err != nil {
+		return nil, err
+	}
+	steps, err := s.store.ListLifecycleSteps(ctx, lifecycleID)
+	if err != nil {
+		return nil, err
+	}
+	executor := lifecycler.NewExecutor(definition, steps)
+	return executor.ValidateRuntime(), nil
+}
+
 func (s *Service) SaveLifecycleDefinition(ctx context.Context, input SaveLifecycleDefinitionInput) ([]LifecycleDefinitionDTO, error) {
 	saved, err := s.store.SaveLifecycleDefinition(ctx, agentgroups.LifecycleDefinition{
 		ID:                  input.ID,
@@ -3043,6 +3078,9 @@ func (s *Service) SaveLifecycleDefinition(ctx context.Context, input SaveLifecyc
 }
 
 func (s *Service) SaveLifecycleStep(ctx context.Context, input SaveLifecycleStepInput) ([]LifecycleStepDTO, error) {
+	if _, err := lifecycler.ParseStepRuntimeConfig(input.OutputSchema); err != nil {
+		return nil, err
+	}
 	saved, err := s.store.SaveLifecycleStep(ctx, agentgroups.LifecycleStep{
 		ID:               input.ID,
 		LifecycleID:      input.LifecycleID,
@@ -3417,6 +3455,7 @@ func (s *Service) startModelHealthMonitor(ctx context.Context) {
 type v03WorkflowResult struct {
 	Intake             string
 	Clarification      string
+	ClarificationStep  string
 	Product            string
 	Blueprint          blueprint.Blueprint
 	Architect          string
@@ -3438,19 +3477,21 @@ func (s *Service) runV03Workflow(
 	result := v03WorkflowResult{}
 
 	executed := map[string]bool{}
-	var runStep func(stepKey string) error
-	runStep = func(stepKey string) error {
-		if executed[stepKey] {
-			return nil
+	outputs := map[string]string{}
+	var runStep func(stepKey string, force bool) (string, error)
+	runStep = func(stepKey string, force bool) (string, error) {
+		if executed[stepKey] && !force {
+			return outputs[stepKey], nil
 		}
 		switch stepKey {
 		case zw.StepManagerIntake:
 			intake, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepManagerIntake, buildManagerIntakeInput(history))
 			if err != nil {
-				return err
+				return "", err
 			}
 			result.Intake = intake
 			executed[stepKey] = true
+			outputs[stepKey] = intake
 			intakeResult, hasStructuredIntake := parseManagerIntake(intake)
 			if hasStructuredIntake {
 				_ = s.updateTaskSpecFromIntake(ctx, project, taskID, run.ID, intakeResult)
@@ -3463,29 +3504,33 @@ func (s *Service) runV03Workflow(
 				} else {
 					result.Clarification = intake
 				}
+				result.ClarificationStep = zw.StepManagerIntake
 			}
+			return intake, nil
 		case zw.StepProductRequirements:
-			if err := runStep(zw.StepManagerIntake); err != nil || result.NeedsClarification {
-				return err
+			if _, err := runStep(zw.StepManagerIntake, false); err != nil || result.NeedsClarification {
+				return "", err
 			}
 			product, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepProductRequirements, buildProductInput(result.Intake))
 			if err != nil {
-				return err
+				return "", err
 			}
 			result.Product = product
 			_ = s.updateTaskSpecFromProduct(ctx, project.ID, taskID, run.ID, product)
 			executed[stepKey] = true
+			outputs[stepKey] = product
+			return product, nil
 		case zw.StepTaskBlueprint:
-			if err := runStep(zw.StepProductRequirements); err != nil || result.NeedsClarification {
-				return err
+			if _, err := runStep(zw.StepProductRequirements, false); err != nil || result.NeedsClarification {
+				return "", err
 			}
 			blueprintOutput, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepTaskBlueprint, buildBlueprintInput(result.Intake, result.Product, projectCheckSignals(project.Path)))
 			if err != nil {
-				return err
+				return "", err
 			}
 			parsedBlueprint, err := blueprint.Parse(blueprintOutput)
 			if err != nil {
-				return err
+				return "", err
 			}
 			parsedBlueprint = blueprint.NormalizeForProject(parsedBlueprint, project.Path)
 			parsedBlueprint = devworkspace.NormalizeBlueprint(parsedBlueprint, project.Path)
@@ -3494,19 +3539,21 @@ func (s *Service) runV03Workflow(
 			parsedBlueprint.WorkflowRunID = run.ID
 			savedBlueprint, err := s.store.CreateTaskBlueprint(ctx, parsedBlueprint)
 			if err != nil {
-				return err
+				return "", err
 			}
 			result.Blueprint = savedBlueprint
 			_ = s.updateTaskSpecFromBlueprint(ctx, project.ID, taskID, run.ID, savedBlueprint)
 			_ = s.updateProjectMemoryFromBlueprint(ctx, project.ID, taskID, savedBlueprint)
 			executed[stepKey] = true
+			outputs[stepKey] = blueprintOutput
+			return blueprintOutput, nil
 		case zw.StepArchitectPlan:
-			if err := runStep(zw.StepTaskBlueprint); err != nil || result.NeedsClarification {
-				return err
+			if _, err := runStep(zw.StepTaskBlueprint, false); err != nil || result.NeedsClarification {
+				return "", err
 			}
 			architect, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepArchitectPlan, buildArchitectInput(result.Intake, result.Product, &result.Blueprint))
 			if err != nil {
-				return err
+				return "", err
 			}
 			result.Architect = architect
 			_ = s.patchProjectMemory(ctx, projectmemory.Memory{
@@ -3515,34 +3562,47 @@ func (s *Service) runV03Workflow(
 				UpdatedFromTaskID: taskID,
 			})
 			executed[stepKey] = true
+			outputs[stepKey] = architect
+			return architect, nil
 		case zw.StepDeveloperPlan:
-			if err := runStep(zw.StepArchitectPlan); err != nil || result.NeedsClarification {
-				return err
+			if _, err := runStep(zw.StepArchitectPlan, false); err != nil || result.NeedsClarification {
+				return "", err
 			}
 			developer, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepDeveloperPlan, buildDeveloperInput(result.Intake, result.Product, &result.Blueprint, result.Architect, projectSourceSnapshot(project.Path)))
 			if err != nil {
-				return err
+				return "", err
 			}
 			result.Developer = developer
 			executed[stepKey] = true
+			outputs[stepKey] = developer
+			return developer, nil
 		default:
 			if isRuntimeOwnedStep(stepKey) {
-				return nil
+				return "", nil
 			}
-			if err := runStep(zw.StepManagerIntake); err != nil || result.NeedsClarification {
-				return err
+			if _, err := runStep(zw.StepManagerIntake, false); err != nil || result.NeedsClarification {
+				return "", err
 			}
-			_, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, stepKey, buildGenericLifecycleInput(result, project, stepKey))
+			output, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, stepKey, buildGenericLifecycleInput(result, project, stepKey))
 			if err != nil {
-				return err
+				return "", err
 			}
 			executed[stepKey] = true
+			outputs[stepKey] = output
+			return output, nil
 		}
-		return nil
+		return "", nil
+	}
+
+	if executor, ok := s.lifecycleExecutor(ctx, projectID); ok {
+		if err := s.runV03RuntimeLifecycle(&result, runStep, executor); err != nil {
+			return result, err
+		}
+		return result, nil
 	}
 
 	for _, stepKey := range s.devLifecycleStepKeys(ctx, projectID) {
-		if err := runStep(stepKey); err != nil {
+		if _, err := runStep(stepKey, false); err != nil {
 			return result, err
 		}
 		if result.NeedsClarification {
@@ -3551,6 +3611,115 @@ func (s *Service) runV03Workflow(
 	}
 
 	return result, nil
+}
+
+func (s *Service) runV03RuntimeLifecycle(
+	result *v03WorkflowResult,
+	runStep func(stepKey string, force bool) (string, error),
+	executor lifecycler.Executor,
+) error {
+	state := lifecycler.RuntimeState{
+		Results:    map[string]lifecycler.StepResult{},
+		Attempts:   map[string]int{},
+		Variables:  map[string]string{},
+		HumanGates: map[string]bool{},
+	}
+	forceNextRun := map[string]bool{}
+	maxTurns := executor.Definition().MaxTotalIterations
+	if maxTurns <= 0 {
+		maxTurns = len(executor.StepKeys()) * (executor.Definition().MaxRepairIterations + 3)
+	}
+	if maxTurns < 20 {
+		maxTurns = 20
+	}
+
+	for turn := 0; turn < maxTurns; turn++ {
+		decision := executor.NextAction(state)
+		switch decision.Action {
+		case lifecycler.ActionComplete:
+			return nil
+		case lifecycler.ActionBlocked:
+			return errors.New(firstNonEmpty(decision.Reason, "lifecycle runtime blocked"))
+		case lifecycler.ActionWaitHuman:
+			result.NeedsClarification = true
+			result.ClarificationStep = decision.Step.StepKey
+			result.Clarification = lifecycleHumanGateNotice(decision)
+			return nil
+		case lifecycler.ActionSkip:
+			state.Results[decision.Step.StepKey] = lifecycler.StepResult{
+				StepKey: decision.Step.StepKey,
+				Status:  zw.StepStatusSkipped,
+			}
+			state.CurrentStepKey = decision.NextStepKey
+		case lifecycler.ActionJump:
+			if decision.NextStepKey != "" {
+				forceNextRun[decision.NextStepKey] = true
+				delete(state.Results, decision.NextStepKey)
+			}
+			state.CurrentStepKey = decision.NextStepKey
+		case lifecycler.ActionRetry:
+			state.Attempts[decision.Step.StepKey]++
+			output, err := runStep(decision.Step.StepKey, true)
+			state.Results[decision.Step.StepKey] = lifecycleStepResult(decision.Step.StepKey, output, err)
+			if result.NeedsClarification {
+				return nil
+			}
+		case lifecycler.ActionRun:
+			force := forceNextRun[decision.Step.StepKey]
+			delete(forceNextRun, decision.Step.StepKey)
+			output, err := runStep(decision.Step.StepKey, force)
+			state.Results[decision.Step.StepKey] = lifecycleStepResult(decision.Step.StepKey, output, err)
+			state.CurrentStepKey = decision.Step.StepKey
+			if result.NeedsClarification {
+				return nil
+			}
+		case lifecycler.ActionRunParallel:
+			for _, step := range decision.Steps {
+				output, err := runStep(step.StepKey, false)
+				state.Results[step.StepKey] = lifecycleStepResult(step.StepKey, output, err)
+				if result.NeedsClarification {
+					return nil
+				}
+			}
+			state.CurrentStepKey = decision.Step.StepKey
+		default:
+			return fmt.Errorf("unknown lifecycle runtime action: %s", decision.Action)
+		}
+	}
+	return errors.New("lifecycle runtime reached max_total_iterations")
+}
+
+func lifecycleStepResult(stepKey string, output string, err error) lifecycler.StepResult {
+	status := zw.StepStatusDone
+	errText := ""
+	if err != nil {
+		status = zw.StepStatusFailed
+		errText = err.Error()
+	}
+	return lifecycler.StepResult{
+		StepKey: stepKey,
+		Status:  status,
+		Output:  output,
+		Error:   errText,
+	}
+}
+
+func lifecycleHumanGateNotice(decision lifecycler.RuntimeDecision) string {
+	var builder strings.Builder
+	builder.WriteString("## Нужно подтверждение\n\n")
+	builder.WriteString(firstNonEmpty(decision.Reason, "Нужно подтвердить следующий шаг workflow."))
+	if len(decision.RequiredInputs) > 0 {
+		builder.WriteString("\n\nЧто нужно подтвердить:\n")
+		for _, input := range decision.RequiredInputs {
+			if strings.TrimSpace(input) == "" {
+				continue
+			}
+			builder.WriteString("- ")
+			builder.WriteString(strings.TrimSpace(input))
+			builder.WriteString("\n")
+		}
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func (s *Service) devLifecycleStepKeys(ctx context.Context, projectID string) []string {

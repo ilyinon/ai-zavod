@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"zavod_ai/internal/checks"
 	"zavod_ai/internal/config"
 	"zavod_ai/internal/ctf"
+	lifecycler "zavod_ai/internal/lifecycle"
 	"zavod_ai/internal/llm"
 	"zavod_ai/internal/project"
 	"zavod_ai/internal/projectmemory"
@@ -877,6 +880,79 @@ func TestCreateAgentGroupFromTemplateCreatesEditableCopy(t *testing.T) {
 	if len(steps) != 8 || steps[0].StepKey != "intake" || steps[len(steps)-1].StepKey != "writeup" {
 		t.Fatalf("expected CTF lifecycle steps, got %#v", steps)
 	}
+	var scopeStep agentgroups.LifecycleStep
+	for _, step := range steps {
+		if step.StepKey == "scope_check" {
+			scopeStep = step
+		}
+	}
+	if !strings.Contains(scopeStep.OutputSchema, "humanGate") {
+		t.Fatalf("expected CTF scope step to contain runtime human gate config, got %#v", scopeStep)
+	}
+	issues, err := service.ValidateLifecycleRuntime(ctx, created.DefaultLifecycleID)
+	if err != nil {
+		t.Fatalf("validate lifecycle runtime: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("expected valid lifecycle runtime, got %#v", issues)
+	}
+}
+
+func TestRunV03RuntimeLifecycleFollowsBranchAndReturn(t *testing.T) {
+	reviewFailure := errors.New("review failed")
+	executor := lifecycler.NewExecutor(agentgroups.LifecycleDefinition{MaxRepairIterations: 1}, []agentgroups.LifecycleStep{
+		{
+			StepKey:   "branch",
+			Mode:      lifecycler.ModeBranch,
+			SortOrder: 1,
+			OutputSchema: mustJSON(t, lifecycler.StepRuntimeConfig{
+				Branches: []lifecycler.BranchRule{{
+					When:        lifecycler.Condition{Operator: "always"},
+					NextStepKey: zw.StepDeveloperPlan,
+				}},
+			}),
+		},
+		{StepKey: zw.StepDeveloperPlan, Mode: lifecycler.ModeLLM, SortOrder: 2},
+		{
+			StepKey:      zw.StepReview,
+			Mode:         lifecycler.ModeReview,
+			CanRetry:     true,
+			MaxRetries:   0,
+			OutputSchema: runtimeReturnConfig(zw.StepDeveloperPlan),
+			SortOrder:    3,
+		},
+		{StepKey: zw.StepManagerFinal, Mode: lifecycler.ModeFinal, SortOrder: 4},
+	})
+
+	calls := []string{}
+	reviewCalls := 0
+	result := v03WorkflowResult{}
+	err := (&Service{}).runV03RuntimeLifecycle(&result, func(stepKey string, force bool) (string, error) {
+		calls = append(calls, stepKey)
+		if stepKey == zw.StepReview {
+			reviewCalls++
+			if reviewCalls <= 2 {
+				return "", reviewFailure
+			}
+		}
+		return "ok", nil
+	}, executor)
+	if err != nil {
+		t.Fatalf("run runtime lifecycle: %v", err)
+	}
+	joined := strings.Join(calls, ",")
+	if !strings.Contains(joined, zw.StepDeveloperPlan+","+zw.StepReview+","+zw.StepReview+","+zw.StepDeveloperPlan+","+zw.StepReview) {
+		t.Fatalf("expected review to return to developer, calls=%v", calls)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return string(raw)
 }
 
 func TestCTFRequestDoesNotAutoSwitchDevProjectGroup(t *testing.T) {

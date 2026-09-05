@@ -2138,8 +2138,8 @@ func (s *Store) EnsureDefaultAgentGroups(ctx context.Context, defaultModelID str
 		{ID: "lstep_dev_blueprint", StepKey: "task_blueprint", Title: "Blueprint", AgentProfileID: "agent_dev_architect", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 		{ID: "lstep_dev_architecture", StepKey: "architect_plan", Title: "Архитектурный план", AgentProfileID: "agent_dev_architect", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 		{ID: "lstep_dev_implementation", StepKey: "developer_plan", Title: "Разработка", AgentProfileID: "agent_dev_developer", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", VisibleToUser: true},
-		{ID: "lstep_dev_checks", StepKey: "tester_commands", Title: "Проверка", AgentProfileID: "agent_dev_tester", Mode: "checks", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", VisibleToUser: true},
-		{ID: "lstep_dev_review", StepKey: "review", Title: "Ревью", AgentProfileID: "agent_dev_reviewer", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", VisibleToUser: true},
+		{ID: "lstep_dev_checks", StepKey: "tester_commands", Title: "Проверка", AgentProfileID: "agent_dev_tester", Mode: "checks", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", OutputSchema: lifecycleReturnConfig("developer_plan"), VisibleToUser: true},
+		{ID: "lstep_dev_review", StepKey: "review", Title: "Ревью", AgentProfileID: "agent_dev_reviewer", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", OutputSchema: lifecycleReturnConfig("developer_plan"), VisibleToUser: true},
 		{ID: "lstep_dev_final", StepKey: "manager_final", Title: "Итог", AgentProfileID: "agent_dev_lumen", Mode: "final", Required: true, VisibleToUser: true},
 	}); err != nil {
 		return err
@@ -2180,12 +2180,12 @@ func (s *Store) EnsureDefaultAgentGroups(ctx context.Context, defaultModelID str
 		UpdatedAt:           now,
 	}, []agentgroups.LifecycleStep{
 		{ID: "lstep_ctf_intake", StepKey: "intake", Title: "Постановка CTF", AgentProfileID: "agent_ctf_lumen", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
-		{ID: "lstep_ctf_scope", StepKey: "scope_check", Title: "Scope", AgentProfileID: "agent_ctf_scout", Mode: "human_gate", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
+		{ID: "lstep_ctf_scope", StepKey: "scope_check", Title: "Scope", AgentProfileID: "agent_ctf_scout", Mode: "human_gate", Required: true, CanRetry: true, MaxRetries: 1, OutputSchema: lifecycleHumanGateConfig("Подтверди CTF/lab scope перед активными сетевыми действиями.", []string{"target", "authorization", "allowed actions"}), VisibleToUser: true},
 		{ID: "lstep_ctf_artifacts", StepKey: "artifact_collection", Title: "Артефакты", AgentProfileID: "agent_ctf_scout", Mode: "tool", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 		{ID: "lstep_ctf_triage", StepKey: "triage", Title: "Категория", AgentProfileID: "agent_ctf_scout", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 		{ID: "lstep_ctf_hypothesis", StepKey: "hypothesis_board", Title: "Гипотезы", AgentProfileID: "agent_ctf_lumen", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 		{ID: "lstep_ctf_solver", StepKey: "category_solver", Title: "Решение", AgentProfileID: "agent_ctf_web", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 3, VisibleToUser: true},
-		{ID: "lstep_ctf_validation", StepKey: "validation", Title: "Проверка flag", AgentProfileID: "agent_ctf_validator", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, VisibleToUser: true},
+		{ID: "lstep_ctf_validation", StepKey: "validation", Title: "Проверка flag", AgentProfileID: "agent_ctf_validator", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "category_solver", OutputSchema: lifecycleReturnConfig("category_solver"), VisibleToUser: true},
 		{ID: "lstep_ctf_writeup", StepKey: "writeup", Title: "Writeup", AgentProfileID: "agent_ctf_lumen", Mode: "final", Required: true, VisibleToUser: true},
 	}); err != nil {
 		return err
@@ -3065,9 +3065,29 @@ func (s *Store) ensureSeedGroup(ctx context.Context, group agentgroups.Group, pr
 		`, step.ID, lifecycle.ID, step.StepKey, step.Title, step.AgentProfileID, step.Mode, boolInt(step.Required), boolInt(step.CanRetry), step.MaxRetries, step.OnSuccessStepKey, step.OnFailureStepKey, step.OutputSchema, boolInt(step.VisibleToUser), index); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE lifecycle_steps
+			SET output_schema = CASE WHEN output_schema = '' THEN ? ELSE output_schema END,
+				on_failure_step_key = CASE WHEN on_failure_step_key = '' THEN ? ELSE on_failure_step_key END
+			WHERE id = ?
+		`, step.OutputSchema, step.OnFailureStepKey, step.ID); err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()
+}
+
+func lifecycleReturnConfig(stepKey string) string {
+	return fmt.Sprintf(`{"returnToStepKey":%q}`, stepKey)
+}
+
+func lifecycleHumanGateConfig(reason string, requiredInputs []string) string {
+	var quoted []string
+	for _, item := range requiredInputs {
+		quoted = append(quoted, fmt.Sprintf("%q", item))
+	}
+	return fmt.Sprintf(`{"humanGate":{"reason":%q,"requiredInputs":[%s]}}`, reason, strings.Join(quoted, ","))
 }
 
 func (s *Store) ListModelConfigs(ctx context.Context) ([]llm.ModelConfig, error) {

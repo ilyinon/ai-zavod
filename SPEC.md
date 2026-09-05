@@ -189,6 +189,79 @@ Acceptance criteria:
 - `events.jsonl` можно использовать для будущего UI/экспорта;
 - пути evidence не могут выйти за пределы project workspace.
 
+## V1.0.0 - Group Lifecycle Runtime
+
+Кастомная группа агентов должна исполняться не как hardcoded список шагов, а как runtime lifecycle: шаги могут ветвиться, ждать пользователя, возвращать задачу назад, ретраиться, запускать независимые ветки параллельно и завершаться по критериям.
+
+Source of truth:
+
+- `agentgroups.LifecycleDefinition` задает лимиты runtime: `max_total_iterations`, `max_repair_iterations`, `same_error_limit`;
+- `agentgroups.LifecycleStep` задает step key, агента, mode, required/retry/transition поля;
+- расширенный runtime config хранится в `LifecycleStep.output_schema` как JSON object, чтобы не ломать старую БД и UI;
+- пустой или не-JSON `output_schema` трактуется как обычная output schema без runtime-настроек.
+
+Поддерживаемые modes:
+
+- `llm` - обычный шаг модели;
+- `tool` - инструментальный шаг;
+- `checks` - проверки/тесты;
+- `review` - review gate;
+- `artifact` - запись файлов/артефактов;
+- `final` - финальный шаг, завершает lifecycle после успеха;
+- `human_gate` - ожидание явного ввода/подтверждения пользователя;
+- `branch` - выбор следующего шага по conditions;
+- `parallel` - запуск набора независимых шагов;
+- `join` - ожидание завершения parallel-группы.
+
+Runtime config fields:
+
+```json
+{
+  "condition": {"field": "var:intent", "operator": "equals", "value": "ctf"},
+  "conditions": [],
+  "branches": [
+    {"when": {"field": "output", "operator": "contains", "value": "needs_work"}, "next": "developer_plan"},
+    {"default": true, "next": "manager_final"}
+  ],
+  "parallel": ["lint", "tests"],
+  "parallelSteps": ["lint", "tests"],
+  "parallelWait": "all",
+  "join": "review",
+  "joinStepKey": "review",
+  "humanGate": {
+    "reason": "Подтверди scope",
+    "requiredInputs": ["target", "authorization"]
+  },
+  "completion": [
+    {"when": {"field": "output", "operator": "contains", "value": "accepted"}, "status": "done"}
+  ],
+  "returnTo": "developer_plan",
+  "return_to": "developer_plan",
+  "returnToStepKey": "developer_plan",
+  "critical": true
+}
+```
+
+Runtime decisions:
+
+- `run` - выполнить текущий шаг;
+- `run_parallel` - выполнить набор parallel targets;
+- `retry` - повторить текущий шаг, если есть retry budget;
+- `jump` - перейти к указанному шагу;
+- `wait_human` - остановиться до ввода пользователя;
+- `skip` - пропустить шаг, если condition false;
+- `blocked` - остановить workflow из-за ошибки runtime/required step;
+- `complete` - завершить lifecycle.
+
+Acceptance criteria:
+
+- runtime валидирует ссылки `on_success`, `on_failure`, `returnTo`, `join`, `branches.next`, `parallel`;
+- `human_gate` не запускает модель сам по себе, а ждет пользователя и после approval продолжает workflow;
+- `parallel` возвращает список шагов для независимого запуска и умеет ждать `all` или `any`;
+- failures сначала расходуют retry budget, затем уходят в `returnTo`/`on_failure`, и только потом становятся настоящим blocker;
+- `final` и `completion` rules умеют завершать workflow;
+- frontend editor поддерживает modes `branch`, `parallel`, `join`.
+
 ## Цель
 
 Локальное macOS desktop-приложение для управления AI-агентами через чат. Пользователь выбирает проект, пишет задачу, а входной агент "Люмен" принимает ее и отвечает через выбранную модель.

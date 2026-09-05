@@ -184,7 +184,7 @@ const defaultWebSettings: WebSettings = {
   blockedDomains: [],
 };
 
-const lifecycleModes = ['llm', 'tool', 'checks', 'review', 'artifact', 'final', 'human_gate'];
+const lifecycleModes = ['llm', 'tool', 'checks', 'review', 'artifact', 'final', 'human_gate', 'branch', 'parallel', 'join'];
 
 type SettingsTab = 'projects' | 'groups' | 'models' | 'web';
 

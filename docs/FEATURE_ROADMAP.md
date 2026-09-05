@@ -312,6 +312,36 @@ CTF Cell должен выбирать инструменты по катего�
 - JSONL не отображается как текст сообщения.
 - Evidence paths защищены от path traversal.
 
+## V1.0.0 - Group Lifecycle Runtime
+
+### Цель
+
+Кастомные группы должны исполняться через полноценный lifecycle runtime, а не через фиксированный порядок шагов.
+
+### Фичи
+
+- Runtime engine в `internal/lifecycle`.
+- Modes: `llm`, `tool`, `checks`, `review`, `artifact`, `final`, `human_gate`, `branch`, `parallel`, `join`.
+- JSON runtime config в `LifecycleStep.output_schema`.
+- Conditions по `status`, `output`, `error`, `var:<name>`.
+- Branch rules с `next`/`nextStepKey`.
+- Parallel groups с `parallel`/`parallelSteps`, `parallelWait=all|any`, `join`.
+- Human gates с reason и required inputs.
+- Retry budget из шага или lifecycle fallback.
+- Возвраты через `returnTo`, `return_to`, `returnToStepKey`, `on_failure_step_key`.
+- Completion rules для раннего завершения или блокировки.
+- Runtime validation API для плохих ссылок и mode.
+- Lifecycle editor знает modes `branch`, `parallel`, `join`.
+
+### Acceptance Criteria
+
+- Branch выбирает следующий шаг по condition.
+- Human gate ждет пользователя и продолжает после approval.
+- Parallel возвращает набор runnable steps и переходит в join после завершения.
+- Failed step сначала ретраится, потом возвращает задачу нужному шагу.
+- Final/completion criteria завершают workflow.
+- Старые lifecycle без JSON config продолжают работать как раньше.
+
 ## V0.7.0 - Task Memory & Spec Store
 
 ### Цель

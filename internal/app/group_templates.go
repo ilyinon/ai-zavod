@@ -59,6 +59,7 @@ type templateStep struct {
 	MaxRetries       int
 	OnSuccessStepKey string
 	OnFailureStepKey string
+	OutputSchema     string
 	VisibleToUser    bool
 }
 
@@ -159,6 +160,7 @@ func (s *Service) CreateAgentGroupFromTemplate(ctx context.Context, input Create
 			MaxRetries:       step.MaxRetries,
 			OnSuccessStepKey: step.OnSuccessStepKey,
 			OnFailureStepKey: step.OnFailureStepKey,
+			OutputSchema:     step.OutputSchema,
 			VisibleToUser:    step.VisibleToUser,
 			SortOrder:        index,
 		}); err != nil {
@@ -208,6 +210,18 @@ func findAgentGroupTemplate(id string) (groupTemplate, bool) {
 	return groupTemplate{}, false
 }
 
+func runtimeReturnConfig(stepKey string) string {
+	return fmt.Sprintf(`{"returnToStepKey":%q}`, stepKey)
+}
+
+func runtimeHumanGateConfig(reason string, requiredInputs []string) string {
+	var quoted []string
+	for _, item := range requiredInputs {
+		quoted = append(quoted, fmt.Sprintf("%q", item))
+	}
+	return fmt.Sprintf(`{"humanGate":{"reason":%q,"requiredInputs":[%s]}}`, reason, strings.Join(quoted, ","))
+}
+
 func agentGroupTemplates() []groupTemplate {
 	return []groupTemplate{
 		devGroupTemplate(),
@@ -245,8 +259,8 @@ func devGroupTemplate() groupTemplate {
 			{StepKey: "task_blueprint", Title: "Blueprint", ProfileKey: "architect", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 			{StepKey: "architect_plan", Title: "Архитектурный план", ProfileKey: "architect", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 			{StepKey: "developer_plan", Title: "Разработка", ProfileKey: "developer", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", VisibleToUser: true},
-			{StepKey: "tester_commands", Title: "Проверка", ProfileKey: "tester", Mode: "checks", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", VisibleToUser: true},
-			{StepKey: "review", Title: "Ревью", ProfileKey: "reviewer", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", VisibleToUser: true},
+			{StepKey: "tester_commands", Title: "Проверка", ProfileKey: "tester", Mode: "checks", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", OutputSchema: runtimeReturnConfig("developer_plan"), VisibleToUser: true},
+			{StepKey: "review", Title: "Ревью", ProfileKey: "reviewer", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "developer_plan", OutputSchema: runtimeReturnConfig("developer_plan"), VisibleToUser: true},
 			{StepKey: "manager_final", Title: "Итог", ProfileKey: "lumen", Mode: "final", Required: true, VisibleToUser: true},
 		},
 	}
@@ -278,12 +292,12 @@ func ctfGroupTemplate() groupTemplate {
 		},
 		Steps: []templateStep{
 			{StepKey: "intake", Title: "Постановка CTF", ProfileKey: "lumen", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
-			{StepKey: "scope_check", Title: "Scope", ProfileKey: "scout", Mode: "human_gate", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
+			{StepKey: "scope_check", Title: "Scope", ProfileKey: "scout", Mode: "human_gate", Required: true, CanRetry: true, MaxRetries: 1, OutputSchema: runtimeHumanGateConfig("Подтверди CTF/lab scope перед активными сетевыми действиями.", []string{"target", "authorization", "allowed actions"}), VisibleToUser: true},
 			{StepKey: "artifact_collection", Title: "Артефакты", ProfileKey: "scout", Mode: "tool", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 			{StepKey: "triage", Title: "Категория", ProfileKey: "scout", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 			{StepKey: "hypothesis_board", Title: "Гипотезы", ProfileKey: "lumen", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
 			{StepKey: "category_solver", Title: "Решение", ProfileKey: "web", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 3, VisibleToUser: true},
-			{StepKey: "validation", Title: "Проверка flag", ProfileKey: "validator", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, VisibleToUser: true},
+			{StepKey: "validation", Title: "Проверка flag", ProfileKey: "validator", Mode: "review", Required: true, CanRetry: true, MaxRetries: 2, OnFailureStepKey: "category_solver", OutputSchema: runtimeReturnConfig("category_solver"), VisibleToUser: true},
 			{StepKey: "writeup", Title: "Writeup", ProfileKey: "lumen", Mode: "final", Required: true, VisibleToUser: true},
 		},
 	}
