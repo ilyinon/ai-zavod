@@ -2229,6 +2229,44 @@ func (s *Store) EnsureDefaultAgentGroups(ctx context.Context, defaultModelID str
 		return err
 	}
 
+	if err := s.ensureSeedGroup(ctx, agentgroups.Group{
+		ID:             "group_security_audit",
+		Name:           "Security Audit",
+		Slug:           "security-audit",
+		Kind:           agentgroups.GroupKindSecurity,
+		Description:    "Команда для defensive-аудита, threat model, hardening и remediation.",
+		DefaultModelID: defaultModelID,
+		Status:         agentgroups.StatusActive,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, []agentgroups.Profile{
+		{ID: "agent_security_lumen", Name: "Люмен", RoleKey: "manager", Description: "Координирует аудит безопасности и итог.", ToolProfileID: "tool_research", Temperature: 0.1, ContextBudget: 12000, Enabled: true},
+		{ID: "agent_security_specialist", Name: "ИБ-специалист", RoleKey: "security", Description: "Разбирает scope, риски и безопасные проверки.", ToolProfileID: "tool_research", Temperature: 0.1, ContextBudget: 12000, Enabled: true},
+		{ID: "agent_security_threat_modeler", Name: "Threat Modeler", RoleKey: "threat_modeler", Description: "Строит модель угроз и trust boundaries.", ToolProfileID: "tool_research", Temperature: 0.12, ContextBudget: 10000, Enabled: true},
+		{ID: "agent_security_remediator", Name: "Remediator", RoleKey: "remediator", Description: "Формирует план исправлений и hardening.", Temperature: 0.1, ContextBudget: 9000, Enabled: true},
+		{ID: "agent_security_reviewer", Name: "Security Reviewer", RoleKey: "reviewer", Description: "Проверяет полноту аудита и отсутствие unsafe-рекомендаций.", Temperature: 0.06, ContextBudget: 9000, Enabled: true},
+	}, agentgroups.LifecycleDefinition{
+		ID:                  "lifecycle_security_default",
+		Name:                "Security Audit Workflow",
+		Kind:                agentgroups.GroupKindSecurity,
+		Description:         "Security workflow: scope, анализ, remediation plan, review, итог.",
+		MaxTotalIterations:  12,
+		MaxRepairIterations: 1,
+		SameErrorLimit:      2,
+		Status:              agentgroups.StatusActive,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}, []agentgroups.LifecycleStep{
+		{ID: "lstep_security_scope", StepKey: "security_scope", Title: "Scope", AgentProfileID: "agent_security_specialist", Mode: "human_gate", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
+		{ID: "lstep_security_analysis", StepKey: "security_analysis", Title: "ИБ-анализ", AgentProfileID: "agent_security_specialist", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
+		{ID: "lstep_security_threat_model", StepKey: "threat_model", Title: "Threat model", AgentProfileID: "agent_security_threat_modeler", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
+		{ID: "lstep_security_remediation", StepKey: "remediation_plan", Title: "Исправления", AgentProfileID: "agent_security_remediator", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
+		{ID: "lstep_security_review", StepKey: "review", Title: "Ревью", AgentProfileID: "agent_security_reviewer", Mode: "review", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},
+		{ID: "lstep_security_final", StepKey: "manager_final", Title: "Итог", AgentProfileID: "agent_security_lumen", Mode: "final", Required: true, VisibleToUser: true},
+	}); err != nil {
+		return err
+	}
+
 	return s.EnsureDefaultProjectGroupBindings(ctx)
 }
 
@@ -2377,7 +2415,7 @@ func (s *Store) ArchiveAgentGroup(ctx context.Context, groupID string) error {
 	if groupID == "" {
 		return fmt.Errorf("group_id пустой")
 	}
-	if groupID == "group_dev_squad" || groupID == "group_ctf_cell" || groupID == "group_research_squad" {
+	if groupID == "group_dev_squad" || groupID == "group_ctf_cell" || groupID == "group_research_squad" || groupID == "group_security_audit" {
 		return fmt.Errorf("seed-группу нельзя архивировать")
 	}
 	_, err := s.db.ExecContext(ctx, `

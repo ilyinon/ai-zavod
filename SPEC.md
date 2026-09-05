@@ -381,6 +381,54 @@ Acceptance criteria:
 - `$skill` в UI и API не создает дубль рядом с `skill`;
 - старые профили без `skills_json` автоматически получают дефолт по роли.
 
+## V1.0.4 - Hermes-like Orchestration
+
+Люмен становится явным orchestrator: перед ответом или запуском workflow она принимает structured decision, выбирает режим исполнения, группу агентов и lifecycle, пропускает лишние шаги и может объяснить это решение.
+
+Source of truth:
+
+- `router.Decision` классифицирует intent пользователя;
+- `orchestration.Decision` решает execution mode, группу, lifecycle и skipped steps;
+- выбранная группа хранится в `project_group_bindings`;
+- lifecycle берется из `AgentGroup.defaultLifecycleID`;
+- наличие живой спеки и Project Memory учитывается в orchestration decision как сигнал, но содержимое Project Memory не отправляется во внешнюю модель без отдельной политики безопасной фильтрации.
+
+Execution modes:
+
+- `direct` - для вопросов, объяснений, вывода спеки/памяти, workflow control и общего чата;
+- `workflow` - для разработки, research, CTF и defensive security задач.
+
+Group selection:
+
+- coding/clarification -> `Dev Squad`;
+- internet/research -> `Research Squad`;
+- explicit CTF/lab/challenge/flag/writeup -> `CTF Cell`;
+- security audit/threat model/plain vulnerability request -> `Security Audit`;
+- direct answers сохраняют текущую группу проекта и не запускают новый workflow.
+
+No extra steps:
+
+- direct answer пропускает requirements/blueprint/development/checks/review;
+- research workflow не гоняет dev requirements/blueprint/checks/review;
+- CTF workflow не гоняет обычный dev pipeline;
+- security workflow не уходит в CTF без явного CTF/lab контекста.
+
+Explainability:
+
+- orchestration decision содержит `reason`, `explanation`, `groupName`, `groupKind`, `lifecycleId`, `skippedSteps`, `usedMemory`;
+- runtime dashboard показывает статус `orchestrating`;
+- direct answer context получает краткое объяснение orchestration decision, чтобы Люмен могла отвечать на вопросы “почему пошла так”.
+
+Acceptance criteria:
+
+- вопрос “выведи спеку” отвечает напрямую и не запускает workflow;
+- research-запрос выбирает `Research Squad`;
+- CTF-запрос с явным CTF/lab/challenge выбирает `CTF Cell`;
+- обычный SQLi/security audit без CTF-контекста выбирает `Security Audit`;
+- coding-задача выбирает `Dev Squad`;
+- выбранная workflow-группа автоматически привязывается к проекту перед запуском;
+- решение покрыто unit-тестами отдельно от UI.
+
 ## Цель
 
 Локальное macOS desktop-приложение для управления AI-агентами через чат. Пользователь выбирает проект, пишет задачу, а входной агент "Люмен" принимает ее и отвечает через выбранную модель.

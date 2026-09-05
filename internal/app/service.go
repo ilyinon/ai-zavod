@@ -27,6 +27,7 @@ import (
 	"zavod_ai/internal/devworkspace"
 	lifecycler "zavod_ai/internal/lifecycle"
 	"zavod_ai/internal/llm"
+	"zavod_ai/internal/orchestration"
 	"zavod_ai/internal/project"
 	"zavod_ai/internal/projectmemory"
 	"zavod_ai/internal/providers/openaiapi"
@@ -683,8 +684,19 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	if decision.Confidence == "low" {
 		decision = s.classifyIntentWithModel(ctx, provider, model, currentProject, *task, latestRun, content, decision)
 	}
-	if !decision.NeedsWorkflow {
-		return s.answerDirect(ctx, currentProject, *task, latestRun, provider, model, content, decision)
+	orch := s.orchestrateMessage(ctx, currentProject, *task, content, decision, model.ID)
+	decision.NeedsWorkflow = orch.NeedsWorkflow
+	decision.NeedsProjectContext = orch.NeedsProjectContext
+	s.emitChatState(ctx, input.ProjectID, "")
+	if !orch.NeedsWorkflow {
+		return s.answerDirect(ctx, currentProject, *task, latestRun, provider, model, content, decision, orch)
+	}
+	if strings.TrimSpace(orch.GroupID) != "" {
+		if _, bindErr := s.store.BindProjectToAgentGroup(ctx, input.ProjectID, orch.GroupID, orch.LifecycleID); bindErr == nil {
+			if refreshed, refreshErr := s.store.GetProject(ctx, input.ProjectID); refreshErr == nil {
+				currentProject = refreshed
+			}
+		}
 	}
 	useCTFWorkflow := decision.Intent == router.IntentPentestTask && s.shouldUseCTFWorkflow(ctx, input.ProjectID, content)
 
@@ -835,6 +847,7 @@ func (s *Service) answerDirect(
 	model llm.ModelConfig,
 	content string,
 	decision router.Decision,
+	orch orchestration.Decision,
 ) (ChatState, error) {
 	s.setAgentStatus(agents.ManagerID, "answering", directAnswerActivity(decision.Intent), model.ID)
 	s.emitChatState(ctx, currentProject.ID, "")
@@ -879,7 +892,7 @@ func (s *Service) answerDirect(
 			},
 			{
 				Role:    "user",
-				Content: s.buildDirectAnswerInput(ctx, currentProject, task, latestRun, content, decision),
+				Content: s.buildDirectAnswerInput(ctx, currentProject, task, latestRun, content, decision, orch),
 			},
 		},
 		Temperature: 0.2,
@@ -1066,6 +1079,64 @@ func (s *Service) shouldUseCTFWorkflow(ctx context.Context, projectID string, me
 		return false
 	}
 	return group.Kind == agentgroups.GroupKindCTF && ctf.IsCTFRequest(message)
+}
+
+func (s *Service) orchestrateMessage(
+	ctx context.Context,
+	currentProject project.Project,
+	task chat.Task,
+	message string,
+	decision router.Decision,
+	modelID string,
+) orchestration.Decision {
+	groups, _ := s.store.ListAgentGroups(ctx, false)
+	var currentGroup *agentgroups.Group
+	if binding, err := s.store.ProjectGroupBinding(ctx, currentProject.ID); err == nil {
+		if group, groupErr := s.store.GetAgentGroup(ctx, binding.GroupID); groupErr == nil {
+			currentGroup = &group
+		}
+	}
+	hasSpec := false
+	if spec, err := s.store.LatestTaskSpecByTask(ctx, task.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
+		hasSpec = true
+	} else if spec, err := s.store.LatestTaskSpecByProject(ctx, currentProject.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
+		hasSpec = true
+	}
+	hasMemory := false
+	if memory, err := s.store.ProjectMemory(ctx, currentProject.ID); err == nil {
+		hasMemory = strings.TrimSpace(memory.ID) != ""
+	}
+	result := orchestration.Decide(orchestration.Input{
+		Message:          message,
+		RouterDecision:   decision,
+		CurrentGroup:     currentGroup,
+		AvailableGroups:  groups,
+		HasTaskSpec:      hasSpec,
+		HasProjectMemory: hasMemory,
+	})
+	s.setAgentRuntimeStatus(
+		agents.ManagerID,
+		"orchestrating",
+		shortenForPrompt(orchestrationActivity(result), 160),
+		modelID,
+		agentRuntimeStatusUpdate{
+			StepKey: "orchestration",
+		},
+	)
+	return result
+}
+
+func orchestrationActivity(decision orchestration.Decision) string {
+	if strings.TrimSpace(decision.GroupName) == "" {
+		if decision.Mode == orchestration.ModeWorkflow {
+			return "Выбирает workflow"
+		}
+		return "Выбирает прямой ответ"
+	}
+	if decision.Mode == orchestration.ModeWorkflow {
+		return "Выбрала workflow: " + decision.GroupName
+	}
+	return "Выбрала прямой ответ: " + decision.GroupName
 }
 
 func (s *Service) maxRepairIterationsForProject(ctx context.Context, projectID string) int {
@@ -4478,7 +4549,7 @@ func (s *Service) setAgentRuntimeStatus(agentID string, status string, activity 
 
 func isActiveAgentStatus(status string) bool {
 	switch status {
-	case "thinking", "calling_model", "answering", "writing_files", "running", "searching_web", "waiting_user", "needs_work":
+	case "thinking", "orchestrating", "calling_model", "answering", "writing_files", "running", "searching_web", "waiting_user", "needs_work":
 		return true
 	default:
 		return false
@@ -6024,12 +6095,21 @@ func deterministicBlockedFinal(result autopilotResult) string {
 	return strings.TrimRight(builder.String(), "\n")
 }
 
-func (s *Service) buildDirectAnswerInput(ctx context.Context, project project.Project, task chat.Task, latestRun *zw.Run, userMessage string, decision router.Decision) string {
+func (s *Service) buildDirectAnswerInput(ctx context.Context, project project.Project, task chat.Task, latestRun *zw.Run, userMessage string, decision router.Decision, orch orchestration.Decision) string {
 	var builder strings.Builder
 	builder.WriteString("# User request\n")
 	builder.WriteString(userMessage)
 	builder.WriteString("\n\n# Router decision\n")
 	builder.WriteString(fmt.Sprintf("- intent: %s\n- confidence: %s\n- reason: %s\n", decision.Intent, decision.Confidence, decision.Reason))
+	if strings.TrimSpace(orch.Explanation) != "" {
+		builder.WriteString("\n# Orchestration decision\n")
+		builder.WriteString(fmt.Sprintf("- mode: %s\n- group: %s (%s)\n- lifecycle: %s\n- used_memory: %t\n- explanation: %s\n", orch.Mode, orch.GroupName, orch.GroupKind, orch.LifecycleID, orch.UsedMemory, orch.Explanation))
+		if len(orch.SkippedSteps) > 0 {
+			builder.WriteString("- skipped_steps: ")
+			builder.WriteString(strings.Join(orch.SkippedSteps, ", "))
+			builder.WriteString("\n")
+		}
+	}
 	builder.WriteString("\n# Project\n")
 	builder.WriteString(fmt.Sprintf("- name: %s\n- path: %s\n", project.Name, project.Path))
 

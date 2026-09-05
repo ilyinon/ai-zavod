@@ -817,6 +817,21 @@ CTF Cell должен выбирать инструменты по катего�
 - Редактор агента позволяет включать быстрые skills `pony-tail`, `dev`, `research`, `security`, `ctf` и вводить кастомные строки.
 - Library/template flow переносит skills при создании группы, добавлении агента и замене контракта.
 
+### V1.0.4 - Hermes-like Orchestration
+
+- Добавлен `internal/orchestration`: structured decision поверх router.
+- Люмен выбирает `direct` или `workflow` до запуска пайпа.
+- Для workflow автоматически выбирается группа:
+  - Dev Squad для разработки;
+  - Research Squad для web/research;
+  - CTF Cell для явного CTF/lab/challenge;
+  - Security Audit для defensive security/threat model/plain vuln audit.
+- Direct answers не запускают лишние requirements/blueprint/development/checks/review.
+- Orchestration decision хранит explanation, выбранную группу/lifecycle, skipped steps и факт использования memory/spec-сигналов.
+- Workflow-группа привязывается к проекту перед запуском, чтобы план и runtime UI смотрели на правильную команду.
+- Добавлен seed `Security Audit`, чтобы defensive security имел штатную команду, а не падал в Dev Squad.
+- Project Memory пока учитывается как routing-сигнал; полное содержимое не отправляется в prompt без отдельной политики безопасной фильтрации.
+
 ## References
 
 - OpenAI Agents SDK описывает агентов как модель с instructions, tools, handoffs, guardrails и structured outputs: https://openai.github.io/openai-agents-python/agents/

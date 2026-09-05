@@ -43,6 +43,7 @@ func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
 	var devGroup agentgroups.Group
 	var ctfGroup agentgroups.Group
 	var researchGroup agentgroups.Group
+	var securityGroup agentgroups.Group
 	for _, group := range groups {
 		if group.ID == "group_dev_squad" {
 			devGroup = group
@@ -53,6 +54,9 @@ func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
 		if group.ID == "group_research_squad" {
 			researchGroup = group
 		}
+		if group.ID == "group_security_audit" {
+			securityGroup = group
+		}
 	}
 	if devGroup.ID == "" || devGroup.DefaultLifecycleID != "lifecycle_dev_default" || devGroup.AgentCount < 6 {
 		t.Fatalf("unexpected Dev Squad seed: %#v", devGroup)
@@ -62,6 +66,9 @@ func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
 	}
 	if researchGroup.ID == "" || researchGroup.DefaultLifecycleID != "lifecycle_research_default" || researchGroup.AgentCount < 4 {
 		t.Fatalf("unexpected Research Squad seed: %#v", researchGroup)
+	}
+	if securityGroup.ID == "" || securityGroup.DefaultLifecycleID != "lifecycle_security_default" || securityGroup.AgentCount < 5 {
+		t.Fatalf("unexpected Security Audit seed: %#v", securityGroup)
 	}
 
 	profiles, err := s.ListAgentProfiles(ctx, devGroup.ID)
@@ -127,6 +134,13 @@ func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
 		if !researchRoles[role] {
 			t.Fatalf("expected Research role %s in seed, got %#v", role, researchRoles)
 		}
+	}
+	securityProfiles, err := s.ListAgentProfiles(ctx, securityGroup.ID)
+	if err != nil {
+		t.Fatalf("list security profiles: %v", err)
+	}
+	if len(securityProfiles) < 5 || !containsString(securityProfiles[1].DefaultSkills, "security") {
+		t.Fatalf("expected Security Audit profiles with security skill, got %#v", securityProfiles)
 	}
 
 	steps, err := s.ListLifecycleSteps(ctx, devGroup.DefaultLifecycleID)
