@@ -7,14 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"zavod_ai/internal/agentgroups"
 	"zavod_ai/internal/agents"
+	"zavod_ai/internal/artifacts"
 	"zavod_ai/internal/blueprint"
 	"zavod_ai/internal/changes"
 	"zavod_ai/internal/chat"
 	"zavod_ai/internal/checks"
 	"zavod_ai/internal/config"
+	"zavod_ai/internal/ctf"
 	"zavod_ai/internal/llm"
 	"zavod_ai/internal/project"
 	"zavod_ai/internal/projectmemory"
@@ -909,6 +912,91 @@ func TestCTFRequestDoesNotAutoSwitchDevProjectGroup(t *testing.T) {
 	if binding.GroupID != "group_dev_squad" {
 		t.Fatalf("expected group to stay Dev Squad, got %#v", binding)
 	}
+}
+
+func TestBuildCTFWorkspaceStateAggregatesFilesAndSteps(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	projectPath := filepath.Join(tmp, "project")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := ctf.PrepareWorkspace(projectPath, "Baby SQLi", "CTF SQLi challenge", ctf.CategorySQLi, time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("prepare ctf workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, workspace.SolveDir, "solve.py"), []byte("print('flag')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.New(filepath.Join(tmp, "zavod.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer db.Close()
+	currentProject, err := db.CreateProject(ctx, "CTF project", projectPath)
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	task, err := db.CreateTask(ctx, currentProject.ID, "Baby SQLi")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	run, err := db.CreateWorkflowRun(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	for _, item := range []artifacts.Artifact{
+		{Kind: "ctf_challenge", Title: "CTF challenge", RelativePath: workspace.ChallengeYAML, Path: filepath.Join(projectPath, workspace.ChallengeYAML)},
+		{Kind: "ctf_scope", Title: "CTF scope", RelativePath: workspace.ScopeMD, Path: filepath.Join(projectPath, workspace.ScopeMD)},
+		{Kind: "ctf_writeup", Title: "CTF writeup", RelativePath: workspace.WriteupMD, Path: filepath.Join(projectPath, workspace.WriteupMD)},
+	} {
+		item.ProjectID = currentProject.ID
+		item.TaskID = task.ID
+		item.WorkflowRunID = run.ID
+		item.AgentID = agents.ManagerID
+		if _, err := db.CreateArtifact(ctx, item); err != nil {
+			t.Fatalf("create artifact: %v", err)
+		}
+	}
+	step, err := db.CreateWorkflowStep(ctx, run.ID, zw.StepCTFHypothesisBoard, agents.ManagerID, "")
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	if _, err := db.FinishWorkflowStep(ctx, step.ID, zw.StepStatusDone, "## Гипотезы\n\n- injectable id", ""); err != nil {
+		t.Fatalf("finish step: %v", err)
+	}
+	steps, err := db.ListWorkflowSteps(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	artifactItems, err := db.ListArtifacts(ctx, currentProject.ID, 20)
+	if err != nil {
+		t.Fatalf("list artifacts: %v", err)
+	}
+	service := &Service{store: db}
+
+	state := service.buildCTFWorkspaceState(currentProject, &task, &run, steps, artifactItems)
+	if state == nil {
+		t.Fatal("expected ctf workspace state")
+	}
+	if state.Category != ctf.CategorySQLi || state.Root != workspace.RelativeRoot || state.WriteupPath != workspace.WriteupMD {
+		t.Fatalf("unexpected ctf workspace summary: %#v", state)
+	}
+	if !strings.Contains(state.Hypotheses.Content, "injectable id") {
+		t.Fatalf("expected hypothesis step content, got %#v", state.Hypotheses)
+	}
+	if !hasCTFWorkspaceFileForTest(state.Files, filepath.ToSlash(filepath.Join(workspace.SolveDir, "solve.py"))) {
+		t.Fatalf("expected solver file in workspace files, got %#v", state.Files)
+	}
+}
+
+func hasCTFWorkspaceFileForTest(files []CTFWorkspaceFile, relativePath string) bool {
+	for _, file := range files {
+		if file.RelativePath == relativePath {
+			return true
+		}
+	}
+	return false
 }
 
 func TestApplyDevPipelineChangeFormatsGoFiles(t *testing.T) {

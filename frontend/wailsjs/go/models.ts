@@ -360,6 +360,104 @@ export namespace app {
 	        this.lifecycleId = source["lifecycleId"];
 	    }
 	}
+	export class CTFWorkspaceFile {
+	    kind: string;
+	    title: string;
+	    relativePath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CTFWorkspaceFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.title = source["title"];
+	        this.relativePath = source["relativePath"];
+	    }
+	}
+	export class CTFWorkspaceSection {
+	    title: string;
+	    status: string;
+	    content: string;
+	    path: string;
+	    agentId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CTFWorkspaceSection(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.title = source["title"];
+	        this.status = source["status"];
+	        this.content = source["content"];
+	        this.path = source["path"];
+	        this.agentId = source["agentId"];
+	    }
+	}
+	export class CTFWorkspaceDTO {
+	    title: string;
+	    category: string;
+	    scopeStatus: string;
+	    root: string;
+	    artifactsDir: string;
+	    evidenceDir: string;
+	    solveDir: string;
+	    writeupPath: string;
+	    challenge: CTFWorkspaceSection;
+	    scope: CTFWorkspaceSection;
+	    artifacts: CTFWorkspaceSection;
+	    hypotheses: CTFWorkspaceSection;
+	    attempts: CTFWorkspaceSection;
+	    evidence: CTFWorkspaceSection;
+	    solver: CTFWorkspaceSection;
+	    writeup: CTFWorkspaceSection;
+	    files: CTFWorkspaceFile[];
+	
+	    static createFrom(source: any = {}) {
+	        return new CTFWorkspaceDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.title = source["title"];
+	        this.category = source["category"];
+	        this.scopeStatus = source["scopeStatus"];
+	        this.root = source["root"];
+	        this.artifactsDir = source["artifactsDir"];
+	        this.evidenceDir = source["evidenceDir"];
+	        this.solveDir = source["solveDir"];
+	        this.writeupPath = source["writeupPath"];
+	        this.challenge = this.convertValues(source["challenge"], CTFWorkspaceSection);
+	        this.scope = this.convertValues(source["scope"], CTFWorkspaceSection);
+	        this.artifacts = this.convertValues(source["artifacts"], CTFWorkspaceSection);
+	        this.hypotheses = this.convertValues(source["hypotheses"], CTFWorkspaceSection);
+	        this.attempts = this.convertValues(source["attempts"], CTFWorkspaceSection);
+	        this.evidence = this.convertValues(source["evidence"], CTFWorkspaceSection);
+	        this.solver = this.convertValues(source["solver"], CTFWorkspaceSection);
+	        this.writeup = this.convertValues(source["writeup"], CTFWorkspaceSection);
+	        this.files = this.convertValues(source["files"], CTFWorkspaceFile);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ClarificationQuestion {
 	    id: string;
 	    text: string;
@@ -427,6 +525,7 @@ export namespace app {
 	    testRuns: checks.TestRun[];
 	    reviews: reviews.ReviewRun[];
 	    webSources: webresearch.Source[];
+	    ctfWorkspace?: CTFWorkspaceDTO;
 	    agentGroup?: agentgroups.Group;
 	    groupBinding?: agentgroups.ProjectBinding;
 	
@@ -452,6 +551,7 @@ export namespace app {
 	        this.testRuns = this.convertValues(source["testRuns"], checks.TestRun);
 	        this.reviews = this.convertValues(source["reviews"], reviews.ReviewRun);
 	        this.webSources = this.convertValues(source["webSources"], webresearch.Source);
+	        this.ctfWorkspace = this.convertValues(source["ctfWorkspace"], CTFWorkspaceDTO);
 	        this.agentGroup = this.convertValues(source["agentGroup"], agentgroups.Group);
 	        this.groupBinding = this.convertValues(source["groupBinding"], agentgroups.ProjectBinding);
 	    }
@@ -524,6 +624,9 @@ export namespace app {
 		    return a;
 		}
 	}
+	
+	
+	
 	export class ChatState {
 	    project: project.Project;
 	    task?: chat.Task;
@@ -541,6 +644,7 @@ export namespace app {
 	    testRuns: checks.TestRun[];
 	    reviews: reviews.ReviewRun[];
 	    webSources: webresearch.Source[];
+	    ctfWorkspace?: CTFWorkspaceDTO;
 	    agentGroup?: agentgroups.Group;
 	    groupBinding?: agentgroups.ProjectBinding;
 	    agents: agents.Status[];
@@ -568,6 +672,7 @@ export namespace app {
 	        this.testRuns = this.convertValues(source["testRuns"], checks.TestRun);
 	        this.reviews = this.convertValues(source["reviews"], reviews.ReviewRun);
 	        this.webSources = this.convertValues(source["webSources"], webresearch.Source);
+	        this.ctfWorkspace = this.convertValues(source["ctfWorkspace"], CTFWorkspaceDTO);
 	        this.agentGroup = this.convertValues(source["agentGroup"], agentgroups.Group);
 	        this.groupBinding = this.convertValues(source["groupBinding"], agentgroups.ProjectBinding);
 	        this.agents = this.convertValues(source["agents"], agents.Status);

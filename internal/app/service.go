@@ -97,6 +97,7 @@ type ProjectState struct {
 	TestRuns      []TestRunDTO            `json:"testRuns"`
 	Reviews       []ReviewRunDTO          `json:"reviews"`
 	WebSources    []WebSourceDTO          `json:"webSources"`
+	CTFWorkspace  *CTFWorkspaceDTO        `json:"ctfWorkspace,omitempty"`
 	AgentGroup    *AgentGroupDTO          `json:"agentGroup,omitempty"`
 	GroupBinding  *ProjectGroupBindingDTO `json:"groupBinding,omitempty"`
 }
@@ -329,6 +330,40 @@ type ProposedChangeDTO = changes.ProposedChange
 type TestRunDTO = checks.TestRun
 type ReviewRunDTO = reviews.ReviewRun
 type WebSourceDTO = webresearch.Source
+
+type CTFWorkspaceDTO struct {
+	Title        string              `json:"title"`
+	Category     string              `json:"category"`
+	ScopeStatus  string              `json:"scopeStatus"`
+	Root         string              `json:"root"`
+	ArtifactsDir string              `json:"artifactsDir"`
+	EvidenceDir  string              `json:"evidenceDir"`
+	SolveDir     string              `json:"solveDir"`
+	WriteupPath  string              `json:"writeupPath"`
+	Challenge    CTFWorkspaceSection `json:"challenge"`
+	Scope        CTFWorkspaceSection `json:"scope"`
+	Artifacts    CTFWorkspaceSection `json:"artifacts"`
+	Hypotheses   CTFWorkspaceSection `json:"hypotheses"`
+	Attempts     CTFWorkspaceSection `json:"attempts"`
+	Evidence     CTFWorkspaceSection `json:"evidence"`
+	Solver       CTFWorkspaceSection `json:"solver"`
+	Writeup      CTFWorkspaceSection `json:"writeup"`
+	Files        []CTFWorkspaceFile  `json:"files"`
+}
+
+type CTFWorkspaceSection struct {
+	Title   string `json:"title"`
+	Status  string `json:"status"`
+	Content string `json:"content"`
+	Path    string `json:"path"`
+	AgentID string `json:"agentId"`
+}
+
+type CTFWorkspaceFile struct {
+	Kind         string `json:"kind"`
+	Title        string `json:"title"`
+	RelativePath string `json:"relativePath"`
+}
 type WebSettingsDTO = webresearch.Settings
 type AgentGroupDTO = agentgroups.Group
 type AgentProfileDTO = agentgroups.Profile
@@ -1511,6 +1546,372 @@ func (s *Service) createCTFArtifacts(ctx context.Context, currentProject project
 		}
 	}
 	return nil
+}
+
+func (s *Service) buildCTFWorkspaceState(currentProject project.Project, task *chat.Task, run *zw.Run, steps []zw.Step, artifactItems []artifacts.Artifact) *CTFWorkspaceDTO {
+	if task == nil || run == nil {
+		return nil
+	}
+	if !hasCTFWorkspaceData(steps, artifactItems) {
+		return nil
+	}
+	stepByKey := map[string]zw.Step{}
+	for _, step := range steps {
+		stepByKey[step.StepKey] = step
+	}
+	root := ctfRootFromArtifacts(artifactItems)
+	category := ctfCategoryFromState(currentProject, task, root, stepByKey)
+	scopeStatus := ctfScopeStatusFromState(currentProject, root, stepByKey)
+	files := ctfWorkspaceFiles(currentProject, root, artifactItems)
+
+	return &CTFWorkspaceDTO{
+		Title:        task.Title,
+		Category:     category,
+		ScopeStatus:  scopeStatus,
+		Root:         root,
+		ArtifactsDir: ctfPathJoin(root, "artifacts"),
+		EvidenceDir:  ctfPathJoin(root, "evidence"),
+		SolveDir:     ctfPathJoin(root, "solve"),
+		WriteupPath:  ctfPathJoin(root, "writeup.md"),
+		Challenge:    ctfFileSection(currentProject, ctfPathJoin(root, "challenge.yml"), "Challenge", "ctf_challenge"),
+		Scope:        ctfSectionFromFileOrStep(currentProject, ctfPathJoin(root, "scope.md"), "Scope", stepByKey[zw.StepCTFScopeCheck]),
+		Artifacts:    ctfSectionFromStep("Артефакты", stepByKey[zw.StepCTFArtifactCollection]),
+		Hypotheses:   ctfSectionFromStep("Гипотезы", stepByKey[zw.StepCTFHypothesisBoard]),
+		Attempts:     ctfAttemptsSection(currentProject, root, stepByKey),
+		Evidence:     ctfEvidenceSection(currentProject, root, stepByKey, files),
+		Solver:       ctfSolverSection(currentProject, root, stepByKey[zw.StepCTFCategorySolver]),
+		Writeup:      ctfSectionFromFileOrStep(currentProject, ctfPathJoin(root, "writeup.md"), "Writeup", stepByKey[zw.StepCTFWriteup]),
+		Files:        files,
+	}
+}
+
+func hasCTFWorkspaceData(steps []zw.Step, artifactItems []artifacts.Artifact) bool {
+	for _, step := range steps {
+		if isCTFStep(step.StepKey) {
+			return true
+		}
+	}
+	for _, item := range artifactItems {
+		relative := filepath.ToSlash(strings.TrimSpace(item.RelativePath))
+		if strings.HasPrefix(item.Kind, "ctf_") || strings.HasPrefix(relative, "ctf/") {
+			return true
+		}
+	}
+	return false
+}
+
+func isCTFStep(stepKey string) bool {
+	switch stepKey {
+	case zw.StepCTFIntake, zw.StepCTFScopeCheck, zw.StepCTFArtifactCollection, zw.StepCTFTriage, zw.StepCTFHypothesisBoard, zw.StepCTFCategorySolver, zw.StepCTFValidation, zw.StepCTFWriteup:
+		return true
+	default:
+		return false
+	}
+}
+
+func ctfRootFromArtifacts(items []artifacts.Artifact) string {
+	for _, item := range items {
+		relative := filepath.ToSlash(strings.TrimSpace(item.RelativePath))
+		if !strings.HasPrefix(relative, "ctf/") {
+			continue
+		}
+		parts := strings.Split(relative, "/")
+		if len(parts) >= 2 && parts[1] != "" {
+			return filepath.ToSlash(filepath.Join(parts[0], parts[1]))
+		}
+	}
+	return ""
+}
+
+func ctfCategoryFromState(currentProject project.Project, task *chat.Task, root string, steps map[string]zw.Step) string {
+	if value := ctfYAMLValue(readProjectRelativeFile(currentProject, ctfPathJoin(root, "challenge.yml")), "category"); value != "" {
+		return value
+	}
+	var text strings.Builder
+	if task != nil {
+		text.WriteString(task.Title)
+		text.WriteString("\n")
+	}
+	for _, key := range []string{zw.StepCTFIntake, zw.StepCTFTriage, zw.StepCTFCategorySolver} {
+		text.WriteString(steps[key].Output)
+		text.WriteString("\n")
+	}
+	return ctf.Classify(text.String())
+}
+
+func ctfScopeStatusFromState(currentProject project.Project, root string, steps map[string]zw.Step) string {
+	if value := ctfYAMLValue(readProjectRelativeFile(currentProject, ctfPathJoin(root, "challenge.yml")), "scope_status"); value != "" {
+		return value
+	}
+	output := strings.ToLower(steps[zw.StepCTFScopeCheck].Output)
+	switch {
+	case strings.Contains(output, "needs_scope") || strings.Contains(output, "нужен scope") || strings.Contains(output, "нужно подтвердить"):
+		return "needs_scope"
+	case strings.Contains(output, "ctf") || strings.Contains(output, "lab") || strings.Contains(output, "локаль"):
+		return "ctf_or_lab_scope"
+	case strings.TrimSpace(output) != "":
+		return "reviewed"
+	default:
+		return ""
+	}
+}
+
+func ctfFileSection(currentProject project.Project, relativePath string, title string, status string) CTFWorkspaceSection {
+	content := readProjectRelativeFile(currentProject, relativePath)
+	return CTFWorkspaceSection{
+		Title:   title,
+		Status:  status,
+		Content: shortenForPrompt(content, 1400),
+		Path:    relativePath,
+	}
+}
+
+func ctfSectionFromFileOrStep(currentProject project.Project, relativePath string, title string, step zw.Step) CTFWorkspaceSection {
+	content := readProjectRelativeFile(currentProject, relativePath)
+	if strings.TrimSpace(content) == "" {
+		content = step.Output
+	}
+	return CTFWorkspaceSection{
+		Title:   title,
+		Status:  ctfSectionStatus(step),
+		Content: shortenForPrompt(content, 1800),
+		Path:    relativePath,
+		AgentID: step.AgentID,
+	}
+}
+
+func ctfSectionFromStep(title string, step zw.Step) CTFWorkspaceSection {
+	return CTFWorkspaceSection{
+		Title:   title,
+		Status:  ctfSectionStatus(step),
+		Content: shortenForPrompt(step.Output, 1800),
+		AgentID: step.AgentID,
+	}
+}
+
+func ctfAttemptsSection(currentProject project.Project, root string, steps map[string]zw.Step) CTFWorkspaceSection {
+	content := extractMarkdownSection(readProjectRelativeFile(currentProject, ctfPathJoin(root, "notes.md")), "Attempts")
+	if strings.TrimSpace(content) == "" {
+		content = steps[zw.StepCTFValidation].Output
+	}
+	return CTFWorkspaceSection{
+		Title:   "Попытки",
+		Status:  ctfSectionStatus(steps[zw.StepCTFValidation]),
+		Content: shortenForPrompt(content, 1800),
+		Path:    ctfPathJoin(root, "notes.md"),
+		AgentID: steps[zw.StepCTFValidation].AgentID,
+	}
+}
+
+func ctfEvidenceSection(currentProject project.Project, root string, steps map[string]zw.Step, files []CTFWorkspaceFile) CTFWorkspaceSection {
+	content := extractMarkdownSection(readProjectRelativeFile(currentProject, ctfPathJoin(root, "notes.md")), "Evidence")
+	if strings.TrimSpace(content) == "" {
+		content = steps[zw.StepCTFArtifactCollection].Output
+	}
+	if len(files) > 0 {
+		var builder strings.Builder
+		if strings.TrimSpace(content) != "" {
+			builder.WriteString(strings.TrimSpace(content))
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString("Файлы workspace:\n")
+		for _, file := range files {
+			builder.WriteString("- ")
+			builder.WriteString(file.RelativePath)
+			builder.WriteString("\n")
+		}
+		content = builder.String()
+	}
+	return CTFWorkspaceSection{
+		Title:   "Evidence",
+		Status:  ctfSectionStatus(steps[zw.StepCTFArtifactCollection]),
+		Content: shortenForPrompt(content, 1800),
+		Path:    ctfPathJoin(root, "evidence"),
+		AgentID: steps[zw.StepCTFArtifactCollection].AgentID,
+	}
+}
+
+func ctfSolverSection(currentProject project.Project, root string, step zw.Step) CTFWorkspaceSection {
+	content := step.Output
+	solveFiles := ctfDirectoryFiles(currentProject, ctfPathJoin(root, "solve"), "solver")
+	if len(solveFiles) > 0 {
+		var builder strings.Builder
+		if strings.TrimSpace(content) != "" {
+			builder.WriteString(strings.TrimSpace(content))
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString("Solver scripts:\n")
+		for _, file := range solveFiles {
+			builder.WriteString("- ")
+			builder.WriteString(file.RelativePath)
+			builder.WriteString("\n")
+		}
+		content = builder.String()
+	}
+	return CTFWorkspaceSection{
+		Title:   "Solver scripts",
+		Status:  ctfSectionStatus(step),
+		Content: shortenForPrompt(content, 1800),
+		Path:    ctfPathJoin(root, "solve"),
+		AgentID: step.AgentID,
+	}
+}
+
+func ctfSectionStatus(step zw.Step) string {
+	if strings.TrimSpace(step.Status) != "" {
+		return step.Status
+	}
+	if strings.TrimSpace(step.Output) != "" {
+		return zw.StepStatusDone
+	}
+	return zw.StepStatusQueued
+}
+
+func ctfWorkspaceFiles(currentProject project.Project, root string, artifactItems []artifacts.Artifact) []CTFWorkspaceFile {
+	seen := map[string]bool{}
+	var files []CTFWorkspaceFile
+	for _, item := range artifactItems {
+		if !strings.HasPrefix(item.Kind, "ctf_") {
+			continue
+		}
+		relative := filepath.ToSlash(strings.TrimSpace(item.RelativePath))
+		if relative == "" || seen[relative] {
+			continue
+		}
+		seen[relative] = true
+		files = append(files, CTFWorkspaceFile{Kind: item.Kind, Title: item.Title, RelativePath: relative})
+	}
+	for _, dir := range []struct {
+		path string
+		kind string
+	}{
+		{ctfPathJoin(root, "artifacts"), "artifact"},
+		{ctfPathJoin(root, "evidence"), "evidence"},
+		{ctfPathJoin(root, "solve"), "solver"},
+	} {
+		for _, file := range ctfDirectoryFiles(currentProject, dir.path, dir.kind) {
+			if seen[file.RelativePath] {
+				continue
+			}
+			seen[file.RelativePath] = true
+			files = append(files, file)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].RelativePath < files[j].RelativePath
+	})
+	return files
+}
+
+func ctfDirectoryFiles(currentProject project.Project, relativeDir string, kind string) []CTFWorkspaceFile {
+	if strings.TrimSpace(currentProject.Path) == "" || strings.TrimSpace(relativeDir) == "" {
+		return nil
+	}
+	root := filepath.Clean(currentProject.Path)
+	dir := filepath.Clean(filepath.Join(root, relativeDir))
+	if dir != root && !strings.HasPrefix(dir, root+string(filepath.Separator)) {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	files := make([]CTFWorkspaceFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		relative := filepath.ToSlash(filepath.Join(relativeDir, entry.Name()))
+		files = append(files, CTFWorkspaceFile{
+			Kind:         kind,
+			Title:        entry.Name(),
+			RelativePath: relative,
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].RelativePath < files[j].RelativePath
+	})
+	return files
+}
+
+func readProjectRelativeFile(currentProject project.Project, relativePath string) string {
+	if strings.TrimSpace(currentProject.Path) == "" || strings.TrimSpace(relativePath) == "" {
+		return ""
+	}
+	root := filepath.Clean(currentProject.Path)
+	target := filepath.Clean(filepath.Join(root, relativePath))
+	if target != root && !strings.HasPrefix(target, root+string(filepath.Separator)) {
+		return ""
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func ctfPathJoin(root string, parts ...string) string {
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	all := append([]string{root}, parts...)
+	return filepath.ToSlash(filepath.Join(all...))
+}
+
+func ctfYAMLValue(content string, key string) string {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, key+":") {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, key+":")), `" '`)
+	}
+	return ""
+}
+
+func extractMarkdownSection(content string, heading string) string {
+	if strings.TrimSpace(content) == "" || strings.TrimSpace(heading) == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	start := -1
+	startLevel := 0
+	needle := strings.ToLower(strings.TrimSpace(heading))
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		title := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+		if strings.ToLower(title) == needle {
+			start = index + 1
+			startLevel = markdownHeadingLevel(trimmed)
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	end := len(lines)
+	for index := start; index < len(lines); index++ {
+		trimmed := strings.TrimSpace(lines[index])
+		if strings.HasPrefix(trimmed, "#") && markdownHeadingLevel(trimmed) <= startLevel {
+			end = index
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines[start:end], "\n"))
+}
+
+func markdownHeadingLevel(line string) int {
+	level := 0
+	for _, r := range line {
+		if r != '#' {
+			break
+		}
+		level++
+	}
+	return level
 }
 
 func (s *Service) classifyIntentWithModel(
@@ -3311,6 +3712,7 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 	testRuns := []checks.TestRun{}
 	reviewRuns := []reviews.ReviewRun{}
 	webSources := []webresearch.Source{}
+	var ctfWorkspace *CTFWorkspaceDTO
 	var activeGroup *agentgroups.Group
 	var groupBinding *agentgroups.ProjectBinding
 	binding, err := s.store.ProjectGroupBinding(ctx, projectID)
@@ -3372,6 +3774,9 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 	if err != nil {
 		return ProjectState{}, err
 	}
+	if task != nil && workflowRun != nil {
+		ctfWorkspace = s.buildCTFWorkspaceState(item, task, workflowRun, workflowSteps, artifactsList)
+	}
 	if memory, memoryErr := s.ensureProjectMemory(ctx, item); memoryErr == nil && strings.TrimSpace(memory.ID) != "" {
 		liveProjectMemory = &memory
 	}
@@ -3392,6 +3797,7 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 		TestRuns:      testRuns,
 		Reviews:       reviewRuns,
 		WebSources:    webSources,
+		CTFWorkspace:  ctfWorkspace,
 		AgentGroup:    activeGroup,
 		GroupBinding:  groupBinding,
 	}, nil

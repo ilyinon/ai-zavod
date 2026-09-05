@@ -84,6 +84,41 @@ Acceptance criteria:
 - слабые/неизвестные trust level визуально отличаются от `high`;
 - источники не дублируются в правом сайдбаре и в теле сообщения.
 
+## V0.9.3 - CTF Workspace UI
+
+CTF-задачи отображаются отдельным рабочим экраном, а не только сообщениями в чате. Экран собирает состояние из CTF lifecycle, `ctf/<challenge>` workspace-файлов и task artifacts.
+
+Структура экрана:
+
+- верхняя сводка: title, category, scope status, root path;
+- пути workspace: `artifacts`, `evidence`, `solve`, `writeup`;
+- карточки:
+  - category/challenge;
+  - scope;
+  - artifacts;
+  - hypotheses;
+  - attempts;
+  - evidence;
+  - solver scripts;
+  - writeup;
+- отдельный список файлов workspace с копированием относительного пути.
+
+Backend:
+
+- `ProjectState` содержит `ctfWorkspace`;
+- DTO собирается только для CTF workflow или CTF artifacts;
+- source of truth остается файловым: `challenge.yml`, `scope.md`, `notes.md`, `writeup.md`, директории `artifacts/`, `evidence/`, `solve/`;
+- outputs шагов используются как live-preview до появления содержимого в файлах;
+- UI не парсит сырые workflow dumps.
+
+Acceptance criteria:
+
+- обычный dev/research проект не показывает CTF workspace;
+- CTF-проект сразу показывает категорию, scope и основные workspace-пути;
+- hypotheses/attempts/evidence/solver/writeup видны отдельными секциями;
+- файлы CTF workspace отображаются без служебных `.zavod` артефактов;
+- длинный markdown в секциях скроллится внутри карточки и не ломает layout.
+
 ## Цель
 
 Локальное macOS desktop-приложение для управления AI-агентами через чат. Пользователь выбирает проект, пишет задачу, а входной агент "Люмен" принимает ее и отвечает через выбранную модель.

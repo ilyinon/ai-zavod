@@ -1091,6 +1091,280 @@ code {
   padding: 1px 4px;
 }
 
+.ctf-workspace-panel {
+  display: grid;
+  width: min(1120px, 100%);
+  align-self: stretch;
+  gap: 14px;
+  border: 1px solid #d6e0e8;
+  border-left: 4px solid #227885;
+  border-radius: 12px;
+  background: #fbfcfd;
+  box-shadow: 0 18px 40px rgba(23, 32, 42, 0.07);
+  padding: 16px;
+}
+
+.ctf-workspace-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.ctf-workspace-header h2 {
+  margin: 3px 0 9px;
+  color: #17202a;
+  font-size: 20px;
+  font-weight: 720;
+  line-height: 1.2;
+}
+
+.ctf-workspace-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.ctf-category,
+.ctf-scope,
+.workflow-chip {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 680;
+  line-height: 1.15;
+  padding: 5px 9px;
+}
+
+.ctf-category {
+  background: #e9f6f8;
+  color: #176d79;
+}
+
+.ctf-scope.ok {
+  background: #e6f6ef;
+  color: #1f6a48;
+}
+
+.ctf-scope.blocked {
+  background: #fff0f0;
+  color: #9c2727;
+}
+
+.ctf-scope.reviewed {
+  background: #eef2f5;
+  color: #526170;
+}
+
+.ctf-workspace-meta code,
+.ctf-workspace-paths code,
+.ctf-file-list code {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #526170;
+  font-size: 12px;
+  padding: 0;
+}
+
+.ctf-workspace-paths {
+  display: grid;
+  flex: 0 1 360px;
+  min-width: 0;
+  gap: 5px;
+  color: #667482;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.ctf-workspace-paths span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctf-workspace-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ctf-section-card {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  border: 1px solid #dbe3ea;
+  border-radius: 10px;
+  background: #fff;
+  padding: 12px;
+}
+
+.ctf-section-card.scope {
+  background: #fffdf8;
+}
+
+.ctf-section-card.evidence,
+.ctf-section-card.writeup {
+  background: #f7fbfc;
+}
+
+.ctf-section-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ctf-section-heading div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ctf-section-heading span:first-child,
+.ctf-section-agent {
+  margin: 0;
+  color: #73808d;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ctf-section-heading strong {
+  overflow: hidden;
+  color: #17202a;
+  font-size: 15px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-chip.done,
+.workflow-chip.ctf_challenge {
+  background: #e6f6ef;
+  color: #1f6a48;
+}
+
+.workflow-chip.running {
+  background: #f7f1e3;
+  color: #66501c;
+}
+
+.workflow-chip.failed,
+.workflow-chip.blocked {
+  background: #fff0f0;
+  color: #9c2727;
+}
+
+.workflow-chip.queued,
+.workflow-chip.skipped {
+  background: #eef2f5;
+  color: #526170;
+}
+
+.ctf-section-card .message-markdown {
+  max-height: 240px;
+  overflow: auto;
+  color: #26323d;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ctf-section-card .message-markdown h2,
+.ctf-section-card .message-markdown h3,
+.ctf-section-card .message-markdown h4 {
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.ctf-copy-path {
+  overflow: hidden;
+  border: 1px solid #d9e0e7;
+  border-radius: 8px;
+  background: #f8fafb;
+  color: #526170;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  padding: 7px 9px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctf-copy-path:hover {
+  border-color: #9ecbd3;
+  color: #176d79;
+}
+
+.ctf-files-panel {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #e5ebf0;
+  padding-top: 12px;
+}
+
+.ctf-files-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #17202a;
+  font-size: 14px;
+}
+
+.ctf-files-heading strong {
+  font-weight: 680;
+}
+
+.ctf-files-heading span {
+  color: #667482;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.ctf-file-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ctf-file-list button {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border: 1px solid #dbe3ea;
+  border-radius: 8px;
+  background: #fff;
+  color: #17202a;
+  cursor: pointer;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.ctf-file-list button:hover {
+  border-color: #9ecbd3;
+  background: #f7fbfc;
+}
+
+.ctf-file-list span,
+.ctf-file-list code,
+.ctf-file-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctf-file-list span {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.ctf-file-list small {
+  color: #73808d;
+  font-size: 11px;
+  font-weight: 650;
+}
+
 .markdown-code-block {
   max-width: 100%;
   overflow: auto;
@@ -3375,6 +3649,20 @@ code {
 
   .active-model-card.header-model {
     width: 100%;
+  }
+
+  .ctf-workspace-header {
+    flex-direction: column;
+  }
+
+  .ctf-workspace-paths {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .ctf-workspace-grid,
+  .ctf-file-list {
+    grid-template-columns: 1fr;
   }
 
   .workflow-popover {

@@ -348,6 +348,40 @@ export type WebSource = {
   createdAt: string;
 };
 
+export type CTFWorkspaceSection = {
+  title: string;
+  status: string;
+  content: string;
+  path: string;
+  agentId: string;
+};
+
+export type CTFWorkspaceFile = {
+  kind: string;
+  title: string;
+  relativePath: string;
+};
+
+export type CTFWorkspace = {
+  title: string;
+  category: string;
+  scopeStatus: string;
+  root: string;
+  artifactsDir: string;
+  evidenceDir: string;
+  solveDir: string;
+  writeupPath: string;
+  challenge: CTFWorkspaceSection;
+  scope: CTFWorkspaceSection;
+  artifacts: CTFWorkspaceSection;
+  hypotheses: CTFWorkspaceSection;
+  attempts: CTFWorkspaceSection;
+  evidence: CTFWorkspaceSection;
+  solver: CTFWorkspaceSection;
+  writeup: CTFWorkspaceSection;
+  files: CTFWorkspaceFile[];
+};
+
 export type WebSettings = {
   enabled: boolean;
   maxResults: number;
@@ -440,6 +474,7 @@ export type ProjectState = {
   testRuns: TestRun[];
   reviews: ReviewRun[];
   webSources: WebSource[];
+  ctfWorkspace?: CTFWorkspace;
   agentGroup?: AgentGroup;
   groupBinding?: ProjectGroupBinding;
 };

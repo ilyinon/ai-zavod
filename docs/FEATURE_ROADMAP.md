@@ -221,6 +221,40 @@ Autopilot должен чинить исправимые проблемы сам
 - Ссылки открываются через Wails `BrowserOpenURL`.
 - Пользователь может скопировать URL источника одной кнопкой.
 
+## V0.9.3 - CTF Workspace UI
+
+### Цель
+
+CTF-задача должна иметь отдельный рабочий экран с состоянием challenge, а не растворяться в чате и отдельных markdown-файлах.
+
+### Фичи
+
+- `ProjectState.ctfWorkspace` как агрегированный DTO для UI.
+- Экран над чатом для CTF workflow:
+  - категория;
+  - scope status;
+  - workspace root;
+  - paths для `artifacts`, `evidence`, `solve`, `writeup`.
+- Карточки workspace:
+  - challenge/category;
+  - scope;
+  - artifacts;
+  - hypotheses;
+  - attempts;
+  - evidence;
+  - solver scripts;
+  - writeup.
+- Список файлов CTF workspace с копированием relative path.
+- Данные берутся из `ctf/<slug>/challenge.yml`, `scope.md`, `notes.md`, `writeup.md`, directories и outputs CTF lifecycle.
+
+### Acceptance Criteria
+
+- Dev/research workflow не показывает CTF workspace.
+- CTF workflow показывает workspace сразу после появления CTF steps/artifacts.
+- Секции не показывают raw JSON и не требуют читать `.zavod`.
+- Длинные секции не ломают высоту чата.
+- UI остается читаемым на узком окне.
+
 ## V0.7.0 - Task Memory & Spec Store
 
 ### Цель

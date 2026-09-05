@@ -9,6 +9,9 @@ import {
   AgentMessageDelta,
   AppPaths,
   ChatState,
+  CTFWorkspace,
+  CTFWorkspaceFile,
+  CTFWorkspaceSection,
   LifecycleDefinition,
   LifecycleStep,
   Message,
@@ -199,6 +202,7 @@ function App() {
   const [clarification, setClarification] = useState<PendingClarification | null>(null);
   const [changes, setChanges] = useState<ProposedChange[]>([]);
   const [webSources, setWebSources] = useState<WebSource[]>([]);
+  const [ctfWorkspace, setCTFWorkspace] = useState<CTFWorkspace | null>(null);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [agentGroups, setAgentGroups] = useState<AgentGroup[]>([]);
   const [agentGroupTemplates, setAgentGroupTemplates] = useState<AgentGroupTemplate[]>([]);
@@ -418,6 +422,7 @@ function App() {
     setClarification(state.clarification ?? null);
     setChanges(state.changes ?? []);
     setWebSources(state.webSources ?? []);
+    setCTFWorkspace(state.ctfWorkspace ?? null);
     setCurrentAgentGroup(state.agentGroup ?? null);
     setGroupBinding(state.groupBinding ?? null);
   }
@@ -1306,7 +1311,9 @@ function App() {
         {error && <div className="error-banner">{error}</div>}
 
         <div className="messages" ref={messagesRef}>
-          {visibleMessages.length === 0 && (
+          {ctfWorkspace && <CTFWorkspacePanel workspace={ctfWorkspace} />}
+
+          {visibleMessages.length === 0 && !ctfWorkspace && (
             <div className="empty-state">
               <h3>Поставь первую задачу</h3>
               <p>Люмен примет ее, уточнит контекст или предложит первый план действий.</p>
@@ -2823,6 +2830,82 @@ function ChangeSummaryDock({
   );
 }
 
+function CTFWorkspacePanel({ workspace }: { workspace: CTFWorkspace }) {
+  const [copiedPath, setCopiedPath] = useState('');
+  const sections = ctfWorkspaceSections(workspace).filter((item) => item.section.content || item.section.path);
+
+  async function handleCopyPath(path: string) {
+    if (!path) {
+      return;
+    }
+    await copyToClipboard(path);
+    setCopiedPath(path);
+    window.setTimeout(() => setCopiedPath(''), 1200);
+  }
+
+  return (
+    <section className="ctf-workspace-panel" aria-label="CTF workspace">
+      <div className="ctf-workspace-header">
+        <div>
+          <p className="eyebrow">CTF workspace</p>
+          <h2>{workspace.title || 'CTF задача'}</h2>
+          <div className="ctf-workspace-meta">
+            <span className="ctf-category">{workspace.category || 'web'}</span>
+            {workspace.scopeStatus && <span className={`ctf-scope ${ctfScopeKind(workspace.scopeStatus)}`}>{ctfScopeLabel(workspace.scopeStatus)}</span>}
+            {workspace.root && <code>{workspace.root}</code>}
+          </div>
+        </div>
+        <div className="ctf-workspace-paths">
+          {workspace.evidenceDir && <span>evidence: <code>{workspace.evidenceDir}</code></span>}
+          {workspace.solveDir && <span>solve: <code>{workspace.solveDir}</code></span>}
+          {workspace.writeupPath && <span>writeup: <code>{workspace.writeupPath}</code></span>}
+        </div>
+      </div>
+
+      <div className="ctf-workspace-grid">
+        {sections.map((item) => (
+          <article key={item.key} className={`ctf-section-card ${item.kind}`}>
+            <div className="ctf-section-heading">
+              <div>
+                <span>{item.label}</span>
+                <strong>{item.section.title || item.label}</strong>
+              </div>
+              <span className={`workflow-chip ${item.section.status || 'queued'}`}>
+                {ctfStatusLabel(item.section.status)}
+              </span>
+            </div>
+            {item.section.agentId && <p className="ctf-section-agent">{agentNameById(item.section.agentId)}</p>}
+            {item.section.content ? <MarkdownContent content={item.section.content} /> : <p className="muted">Пока нет данных.</p>}
+            {item.section.path && (
+              <button className="ctf-copy-path" type="button" onClick={() => void handleCopyPath(item.section.path)}>
+                {copiedPath === item.section.path ? 'Путь скопирован' : item.section.path}
+              </button>
+            )}
+          </article>
+        ))}
+      </div>
+
+      {workspace.files.length > 0 && (
+        <div className="ctf-files-panel">
+          <div className="ctf-files-heading">
+            <strong>Файлы workspace</strong>
+            <span>{workspace.files.length}</span>
+          </div>
+          <div className="ctf-file-list">
+            {workspace.files.map((file) => (
+              <button key={`${file.kind}:${file.relativePath}`} type="button" onClick={() => void handleCopyPath(file.relativePath)}>
+                <span>{file.title || file.relativePath}</span>
+                <code>{file.relativePath}</code>
+                <small>{copiedPath === file.relativePath ? 'скопировано' : ctfFileKindLabel(file)}</small>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function WebSourcesDock({
   sources,
   isOpen,
@@ -3637,6 +3720,90 @@ function hostFromUrl(value: string): string {
     return new URL(value).hostname.replace(/^www\./, '');
   } catch {
     return value;
+  }
+}
+
+function ctfWorkspaceSections(workspace: CTFWorkspace): Array<{
+  key: string;
+  label: string;
+  kind: string;
+  section: CTFWorkspaceSection;
+}> {
+  return [
+    { key: 'challenge', label: 'Задача', kind: 'challenge', section: workspace.challenge },
+    { key: 'scope', label: 'Scope', kind: 'scope', section: workspace.scope },
+    { key: 'artifacts', label: 'Артефакты', kind: 'artifacts', section: workspace.artifacts },
+    { key: 'hypotheses', label: 'Гипотезы', kind: 'hypotheses', section: workspace.hypotheses },
+    { key: 'attempts', label: 'Попытки', kind: 'attempts', section: workspace.attempts },
+    { key: 'evidence', label: 'Evidence', kind: 'evidence', section: workspace.evidence },
+    { key: 'solver', label: 'Solver scripts', kind: 'solver', section: workspace.solver },
+    { key: 'writeup', label: 'Writeup', kind: 'writeup', section: workspace.writeup },
+  ];
+}
+
+function ctfStatusLabel(value: string): string {
+  switch (value) {
+    case 'done':
+    case 'ctf_challenge':
+      return 'готово';
+    case 'running':
+      return 'в работе';
+    case 'failed':
+      return 'ошибка';
+    case 'blocked':
+      return 'блокер';
+    case 'skipped':
+      return 'пропущено';
+    default:
+      return 'ожидает';
+  }
+}
+
+function ctfScopeKind(value: string): string {
+  switch (value) {
+    case 'needs_scope':
+      return 'blocked';
+    case 'ctf_or_lab_scope':
+    case 'local_artifact_scope':
+      return 'ok';
+    default:
+      return 'reviewed';
+  }
+}
+
+function ctfScopeLabel(value: string): string {
+  switch (value) {
+    case 'needs_scope':
+      return 'нужен scope';
+    case 'ctf_or_lab_scope':
+      return 'CTF/lab scope';
+    case 'local_artifact_scope':
+      return 'локальные артефакты';
+    case 'reviewed':
+      return 'scope проверен';
+    default:
+      return value;
+  }
+}
+
+function ctfFileKindLabel(file: CTFWorkspaceFile): string {
+  switch (file.kind) {
+    case 'ctf_challenge':
+      return 'challenge';
+    case 'ctf_scope':
+      return 'scope';
+    case 'ctf_notes':
+      return 'notes';
+    case 'ctf_writeup':
+      return 'writeup';
+    case 'artifact':
+      return 'artifact';
+    case 'evidence':
+      return 'evidence';
+    case 'solver':
+      return 'solver';
+    default:
+      return file.kind || 'file';
   }
 }
 
