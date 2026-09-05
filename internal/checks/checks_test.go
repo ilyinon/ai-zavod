@@ -26,6 +26,9 @@ func TestValidateCommandAllowsExpectedCommands(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectPath, "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(projectPath, "requirements.txt"), []byte("# standard library only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(projectPath, "scripts", "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -40,9 +43,9 @@ func TestValidateCommandAllowsExpectedCommands(t *testing.T) {
 		{command: "npm test", workingDir: "frontend"},
 		{command: "npm run build", workingDir: "frontend"},
 		{command: "npm run lint", workingDir: "frontend"},
-		{command: "python check.py"},
-		{command: "python3 scripts/check.py"},
 		{command: ".venv/bin/python check.py"},
+		{command: ".venv/bin/python scripts/check.py"},
+		{command: ".venv/bin/python -m py_compile scripts/check.py"},
 	}
 
 	for _, tc := range cases {
@@ -65,6 +68,8 @@ func TestValidateCommandBlocksUnsafeCommands(t *testing.T) {
 		{command: "npm run build | cat"},
 		{command: "npm run build", workingDir: "../other"},
 		{command: "python -c print(1)"},
+		{command: "python check.py"},
+		{command: "python3 check.py"},
 		{command: "python ../check.py"},
 		{command: "python check.py --verbose"},
 	}
@@ -87,6 +92,7 @@ func TestValidateCommandBlocksUnsupportedProjectCommands(t *testing.T) {
 		"go vet ./...",
 		"npm run build",
 		"python missing.py",
+		".venv/bin/python check.py",
 	}
 	for _, command := range cases {
 		if err := ValidateCommand(projectPath, command, ""); err == nil {
@@ -98,6 +104,9 @@ func TestValidateCommandBlocksUnsupportedProjectCommands(t *testing.T) {
 func TestDefaultSuggestionsUsesPythonProject(t *testing.T) {
 	projectPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(projectPath, "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "requirements.txt"), []byte("# standard library only\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -115,6 +124,9 @@ func TestFilterSupportedSuggestionsRemovesUnsupported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectPath, "check.py"), []byte("print('ok')\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(projectPath, "requirements.txt"), []byte("# standard library only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	got := FilterSupportedSuggestions(projectPath, []Suggestion{
 		{Command: "go test ./..."},
@@ -122,6 +134,39 @@ func TestFilterSupportedSuggestionsRemovesUnsupported(t *testing.T) {
 	})
 	if len(got) != 1 || got[0].Command != ".venv/bin/python check.py" {
 		t.Fatalf("expected only supported Python suggestion, got %#v", got)
+	}
+}
+
+func TestDefaultSuggestionsUsesPytestWhenProjectHasTests(t *testing.T) {
+	projectPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectPath, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "requirements.txt"), []byte("pytest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DefaultSuggestions(projectPath)
+	if len(got) != 1 || got[0].Command != ".venv/bin/python -m pytest" {
+		t.Fatalf("expected pytest suggestion, got %#v", got)
+	}
+}
+
+func TestDefaultSuggestionsUsesPyCompileFallback(t *testing.T) {
+	projectPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectPath, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "requirements.txt"), []byte("# standard library only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "src", "tool.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DefaultSuggestions(projectPath)
+	if len(got) != 1 || got[0].Command != ".venv/bin/python -m py_compile src/tool.py" {
+		t.Fatalf("expected py_compile suggestion, got %#v", got)
 	}
 }
 
@@ -172,15 +217,26 @@ func TestRunBlocksUnsafeCommand(t *testing.T) {
 	}
 }
 
-func TestResolveExecutableAliasUsesPython3WhenPythonMissing(t *testing.T) {
-	if _, err := exec.LookPath("python"); err == nil {
-		t.Skip("python exists in PATH")
+func TestNormalizeSuggestionsForcesPythonVenv(t *testing.T) {
+	got := ExtractSuggestions(`{
+		"summary": "python",
+		"commands": [
+			{"command":"python3 check.py","reason":"script"},
+			{"command":"python -m pytest","reason":"tests"},
+			{"command":"python -m py_compile src/tool.py","reason":"syntax"}
+		]
+	}`)
+	want := []string{
+		".venv/bin/python check.py",
+		".venv/bin/python -m pytest",
+		".venv/bin/python -m py_compile src/tool.py",
 	}
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 is not available in PATH")
+	if len(got) != len(want) {
+		t.Fatalf("expected %d suggestions, got %#v", len(want), got)
 	}
-	args := resolveExecutableAlias([]string{"python", "check.py"})
-	if args[0] != "python3" {
-		t.Fatalf("expected python3 fallback, got %#v", args)
+	for index, command := range want {
+		if got[index].Command != command {
+			t.Fatalf("suggestion %d = %q, want %q", index, got[index].Command, command)
+		}
 	}
 }

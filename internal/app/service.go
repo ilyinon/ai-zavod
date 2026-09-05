@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"zavod_ai/internal/agentgroups"
 	"zavod_ai/internal/agents"
 	"zavod_ai/internal/artifacts"
 	"zavod_ai/internal/blueprint"
@@ -20,12 +23,19 @@ import (
 	"zavod_ai/internal/chat"
 	"zavod_ai/internal/checks"
 	"zavod_ai/internal/config"
+	"zavod_ai/internal/ctf"
+	"zavod_ai/internal/devworkspace"
+	lifecycler "zavod_ai/internal/lifecycle"
 	"zavod_ai/internal/llm"
 	"zavod_ai/internal/project"
+	"zavod_ai/internal/projectmemory"
 	"zavod_ai/internal/providers/openaiapi"
+	"zavod_ai/internal/repairloop"
+	"zavod_ai/internal/reviewgate"
 	"zavod_ai/internal/reviews"
 	"zavod_ai/internal/router"
 	"zavod_ai/internal/store"
+	"zavod_ai/internal/taskspec"
 	"zavod_ai/internal/webresearch"
 	zw "zavod_ai/internal/workflow"
 )
@@ -57,31 +67,38 @@ type Service struct {
 }
 
 type BootstrapState struct {
-	Paths             config.Paths     `json:"paths"`
-	Projects          []ProjectDTO     `json:"projects"`
-	SelectedProjectID string           `json:"selectedProjectId"`
-	Chat              ProjectState     `json:"chat"`
-	Agents            []agents.Status  `json:"agents"`
-	Models            []ModelConfigDTO `json:"models"`
-	ActiveModelID     string           `json:"activeModelId"`
-	WebSettings       WebSettingsDTO   `json:"webSettings"`
+	Paths               config.Paths            `json:"paths"`
+	Projects            []ProjectDTO            `json:"projects"`
+	SelectedProjectID   string                  `json:"selectedProjectId"`
+	Chat                ProjectState            `json:"chat"`
+	Agents              []agents.Status         `json:"agents"`
+	Models              []ModelConfigDTO        `json:"models"`
+	ActiveModelID       string                  `json:"activeModelId"`
+	WebSettings         WebSettingsDTO          `json:"webSettings"`
+	AgentGroups         []AgentGroupDTO         `json:"agentGroups"`
+	AgentGroupTemplates []AgentGroupTemplateDTO `json:"agentGroupTemplates"`
+	AgentLibrary        []AgentLibraryItemDTO   `json:"agentLibrary"`
 }
 
 type ProjectState struct {
-	Project       ProjectDTO            `json:"project"`
-	Task          *TaskDTO              `json:"task,omitempty"`
-	Messages      []MessageDTO          `json:"messages"`
-	WorkflowRun   *WorkflowRunDTO       `json:"workflowRun,omitempty"`
-	WorkflowSteps []WorkflowStepDTO     `json:"workflowSteps"`
-	WorkflowPlan  *WorkflowPlanDTO      `json:"workflowPlan,omitempty"`
-	PlanSteps     []WorkflowPlanStepDTO `json:"planSteps"`
-	Artifacts     []ArtifactDTO         `json:"artifacts"`
-	Blueprint     *BlueprintDTO         `json:"blueprint,omitempty"`
-	Clarification *ClarificationDTO     `json:"clarification,omitempty"`
-	Changes       []ProposedChangeDTO   `json:"changes"`
-	TestRuns      []TestRunDTO          `json:"testRuns"`
-	Reviews       []ReviewRunDTO        `json:"reviews"`
-	WebSources    []WebSourceDTO        `json:"webSources"`
+	Project       ProjectDTO              `json:"project"`
+	Task          *TaskDTO                `json:"task,omitempty"`
+	Messages      []MessageDTO            `json:"messages"`
+	WorkflowRun   *WorkflowRunDTO         `json:"workflowRun,omitempty"`
+	WorkflowSteps []WorkflowStepDTO       `json:"workflowSteps"`
+	WorkflowPlan  *WorkflowPlanDTO        `json:"workflowPlan,omitempty"`
+	PlanSteps     []WorkflowPlanStepDTO   `json:"planSteps"`
+	Artifacts     []ArtifactDTO           `json:"artifacts"`
+	Blueprint     *BlueprintDTO           `json:"blueprint,omitempty"`
+	Clarification *ClarificationDTO       `json:"clarification,omitempty"`
+	TaskSpec      *TaskSpecDTO            `json:"taskSpec,omitempty"`
+	ProjectMemory *ProjectMemoryDTO       `json:"projectMemory,omitempty"`
+	Changes       []ProposedChangeDTO     `json:"changes"`
+	TestRuns      []TestRunDTO            `json:"testRuns"`
+	Reviews       []ReviewRunDTO          `json:"reviews"`
+	WebSources    []WebSourceDTO          `json:"webSources"`
+	AgentGroup    *AgentGroupDTO          `json:"agentGroup,omitempty"`
+	GroupBinding  *ProjectGroupBindingDTO `json:"groupBinding,omitempty"`
 }
 
 type ChatState struct {
@@ -108,12 +125,16 @@ type WorkflowStepChanged struct {
 }
 
 type CreateProjectInput struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	GroupID     string `json:"groupId"`
+	LifecycleID string `json:"lifecycleId"`
 }
 
 type AddExistingProjectInput struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	GroupID     string `json:"groupId"`
+	LifecycleID string `json:"lifecycleId"`
 }
 
 type UpdateProjectInput struct {
@@ -160,6 +181,11 @@ type ApplyWorkflowChangesInput struct {
 	WorkflowRunID string `json:"workflowRunId"`
 }
 
+type RollbackWorkflowChangesInput struct {
+	ProjectID     string `json:"projectId"`
+	WorkflowRunID string `json:"workflowRunId"`
+}
+
 type RunTestCommandInput struct {
 	ProjectID string `json:"projectId"`
 	TestRunID string `json:"testRunId"`
@@ -189,6 +215,103 @@ type SaveWebSettingsInput struct {
 	BlockedDomains      []string `json:"blockedDomains"`
 }
 
+type CreateAgentGroupInput struct {
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Description    string `json:"description"`
+	DefaultModelID string `json:"defaultModelId"`
+}
+
+type UpdateAgentGroupInput struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Description    string `json:"description"`
+	DefaultModelID string `json:"defaultModelId"`
+}
+
+type ArchiveAgentGroupInput struct {
+	GroupID string `json:"groupId"`
+}
+
+type SaveAgentProfileInput struct {
+	ID            string   `json:"id"`
+	GroupID       string   `json:"groupId"`
+	Name          string   `json:"name"`
+	RoleKey       string   `json:"roleKey"`
+	Description   string   `json:"description"`
+	AvatarPath    string   `json:"avatarPath"`
+	SoulPath      string   `json:"soulPath"`
+	ModelID       string   `json:"modelId"`
+	ToolProfileID string   `json:"toolProfileId"`
+	Capabilities  []string `json:"capabilities"`
+	AllowedTools  []string `json:"allowedTools"`
+	ReadPaths     []string `json:"readPaths"`
+	WritePaths    []string `json:"writePaths"`
+	HandoffRules  []string `json:"handoffRules"`
+	Temperature   float64  `json:"temperature"`
+	ContextBudget int      `json:"contextBudget"`
+	Enabled       bool     `json:"enabled"`
+	SortOrder     int      `json:"sortOrder"`
+}
+
+type AgentSoulDTO struct {
+	ProfileID string   `json:"profileId"`
+	Path      string   `json:"path"`
+	Content   string   `json:"content"`
+	Warnings  []string `json:"warnings"`
+}
+
+type SaveAgentSoulInput struct {
+	ProfileID string `json:"profileId"`
+	Content   string `json:"content"`
+}
+
+type SetAgentProfileEnabledInput struct {
+	ProfileID string `json:"profileId"`
+	Enabled   bool   `json:"enabled"`
+}
+
+type BindProjectAgentGroupInput struct {
+	ProjectID   string `json:"projectId"`
+	GroupID     string `json:"groupId"`
+	LifecycleID string `json:"lifecycleId"`
+}
+
+type SaveLifecycleDefinitionInput struct {
+	ID                  string `json:"id"`
+	GroupID             string `json:"groupId"`
+	Name                string `json:"name"`
+	Kind                string `json:"kind"`
+	Description         string `json:"description"`
+	MaxTotalIterations  int    `json:"maxTotalIterations"`
+	MaxRepairIterations int    `json:"maxRepairIterations"`
+	SameErrorLimit      int    `json:"sameErrorLimit"`
+	Status              string `json:"status"`
+}
+
+type SaveLifecycleStepInput struct {
+	ID               string `json:"id"`
+	LifecycleID      string `json:"lifecycleId"`
+	StepKey          string `json:"stepKey"`
+	Title            string `json:"title"`
+	AgentProfileID   string `json:"agentProfileId"`
+	Mode             string `json:"mode"`
+	Required         bool   `json:"required"`
+	CanRetry         bool   `json:"canRetry"`
+	MaxRetries       int    `json:"maxRetries"`
+	OnSuccessStepKey string `json:"onSuccessStepKey"`
+	OnFailureStepKey string `json:"onFailureStepKey"`
+	OutputSchema     string `json:"outputSchema"`
+	VisibleToUser    bool   `json:"visibleToUser"`
+	SortOrder        int    `json:"sortOrder"`
+}
+
+type DeleteLifecycleStepInput struct {
+	StepID      string `json:"stepId"`
+	LifecycleID string `json:"lifecycleId"`
+}
+
 type ProjectDTO = project.Project
 type TaskDTO = chat.Task
 type MessageDTO = chat.Message
@@ -199,12 +322,19 @@ type WorkflowPlanDTO = zw.Plan
 type WorkflowPlanStepDTO = zw.PlanStep
 type ArtifactDTO = artifacts.Artifact
 type BlueprintDTO = blueprint.Blueprint
+type TaskSpecDTO = taskspec.Spec
+type ProjectMemoryDTO = projectmemory.Memory
 type PendingClarificationDTO = ClarificationDTO
 type ProposedChangeDTO = changes.ProposedChange
 type TestRunDTO = checks.TestRun
 type ReviewRunDTO = reviews.ReviewRun
 type WebSourceDTO = webresearch.Source
 type WebSettingsDTO = webresearch.Settings
+type AgentGroupDTO = agentgroups.Group
+type AgentProfileDTO = agentgroups.Profile
+type LifecycleDefinitionDTO = agentgroups.LifecycleDefinition
+type LifecycleStepDTO = agentgroups.LifecycleStep
+type ProjectGroupBindingDTO = agentgroups.ProjectBinding
 
 func NewService(ctx context.Context, sink EventSink) (*Service, error) {
 	paths, err := config.DefaultPaths()
@@ -224,6 +354,12 @@ func NewService(ctx context.Context, sink EventSink) (*Service, error) {
 		return nil, err
 	}
 
+	activeModel, err := db.ActiveModelConfig(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	service := &Service{
 		store:         db,
 		paths:         paths,
@@ -234,9 +370,11 @@ func NewService(ctx context.Context, sink EventSink) (*Service, error) {
 		_ = db.Close()
 		return nil, err
 	}
-
-	activeModel, err := db.ActiveModelConfig(ctx)
-	if err != nil {
+	if err := db.EnsureDefaultAgentGroups(ctx, activeModel.ID); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := service.ensureDefaultAgentSouls(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -259,6 +397,18 @@ func (s *Service) Bootstrap(ctx context.Context) (BootstrapState, error) {
 		return BootstrapState{}, err
 	}
 	webSettings := s.webSettings(ctx)
+	agentGroups, err := s.store.ListAgentGroups(ctx, false)
+	if err != nil {
+		return BootstrapState{}, err
+	}
+	agentGroupTemplates, err := s.ListAgentGroupTemplates(ctx)
+	if err != nil {
+		return BootstrapState{}, err
+	}
+	agentLibrary, err := s.ListAgentLibrary(ctx)
+	if err != nil {
+		return BootstrapState{}, err
+	}
 
 	selectedID, _, _ := s.store.GetSetting(ctx, selectedProjectSetting)
 	if selectedID == "" && len(projects) > 0 {
@@ -280,14 +430,17 @@ func (s *Service) Bootstrap(ctx context.Context) (BootstrapState, error) {
 	}
 
 	return BootstrapState{
-		Paths:             s.paths,
-		Projects:          projects,
-		SelectedProjectID: selectedID,
-		Chat:              state,
-		Agents:            s.AgentStatuses(),
-		Models:            models,
-		ActiveModelID:     activeModel.ID,
-		WebSettings:       webSettings,
+		Paths:               s.paths,
+		Projects:            projects,
+		SelectedProjectID:   selectedID,
+		Chat:                state,
+		Agents:              s.AgentStatuses(),
+		Models:              models,
+		ActiveModelID:       activeModel.ID,
+		WebSettings:         webSettings,
+		AgentGroups:         agentGroups,
+		AgentGroupTemplates: agentGroupTemplates,
+		AgentLibrary:        agentLibrary,
 	}, nil
 }
 
@@ -300,6 +453,10 @@ func (s *Service) CreateProject(ctx context.Context, input CreateProjectInput) (
 	if name == "" {
 		name = "Новый проект"
 	}
+	groupID, lifecycleID, err := s.resolveProjectGroupChoice(ctx, input.GroupID, input.LifecycleID)
+	if err != nil {
+		return ProjectDTO{}, err
+	}
 
 	path := uniqueProjectPath(s.paths.ProjectsDir, safeProjectDirName(name))
 	if err := os.MkdirAll(path, 0o755); err != nil {
@@ -310,6 +467,10 @@ func (s *Service) CreateProject(ctx context.Context, input CreateProjectInput) (
 	if err != nil {
 		return ProjectDTO{}, err
 	}
+	if _, err := s.store.BindProjectToAgentGroup(ctx, item.ID, groupID, lifecycleID); err != nil {
+		return ProjectDTO{}, err
+	}
+	_, _ = s.ensureProjectMemory(ctx, item)
 	_ = s.store.SetSetting(ctx, selectedProjectSetting, item.ID)
 	return item, nil
 }
@@ -331,13 +492,49 @@ func (s *Service) AddExistingProject(ctx context.Context, input AddExistingProje
 	if name == "" {
 		name = filepath.Base(path)
 	}
+	groupID, lifecycleID, err := s.resolveProjectGroupChoice(ctx, input.GroupID, input.LifecycleID)
+	if err != nil {
+		return ProjectDTO{}, err
+	}
 
 	item, err := s.store.CreateProject(ctx, name, path)
 	if err != nil {
 		return ProjectDTO{}, err
 	}
+	if _, err := s.store.BindProjectToAgentGroup(ctx, item.ID, groupID, lifecycleID); err != nil {
+		return ProjectDTO{}, err
+	}
+	_, _ = s.ensureProjectMemory(ctx, item)
 	_ = s.store.SetSetting(ctx, selectedProjectSetting, item.ID)
 	return item, nil
+}
+
+func (s *Service) resolveProjectGroupChoice(ctx context.Context, groupID string, lifecycleID string) (string, string, error) {
+	groupID = strings.TrimSpace(groupID)
+	lifecycleID = strings.TrimSpace(lifecycleID)
+	if groupID == "" {
+		groupID = "group_dev_squad"
+	}
+	group, err := s.store.GetAgentGroup(ctx, groupID)
+	if err != nil {
+		return "", "", fmt.Errorf("группа проекта не найдена: %w", err)
+	}
+	if group.Status == agentgroups.StatusArchived {
+		return "", "", fmt.Errorf("нельзя создать проект с архивной группой %s", group.Name)
+	}
+	if lifecycleID == "" {
+		lifecycleID = group.DefaultLifecycleID
+	}
+	if lifecycleID != "" {
+		lifecycle, err := s.store.GetLifecycleDefinition(ctx, lifecycleID)
+		if err != nil {
+			return "", "", fmt.Errorf("lifecycle группы не найден: %w", err)
+		}
+		if lifecycle.GroupID != group.ID {
+			return "", "", fmt.Errorf("lifecycle не принадлежит выбранной группе")
+		}
+	}
+	return group.ID, lifecycleID, nil
 }
 
 func (s *Service) UpdateProject(ctx context.Context, input UpdateProjectInput) (ProjectDTO, error) {
@@ -364,6 +561,7 @@ func (s *Service) UpdateProject(ctx context.Context, input UpdateProjectInput) (
 	if err != nil {
 		return ProjectDTO{}, err
 	}
+	_, _ = s.ensureProjectMemory(ctx, item)
 	return item, nil
 }
 
@@ -410,6 +608,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	}
 	_ = s.store.TouchProject(ctx, input.ProjectID)
 	_ = s.store.SetSetting(ctx, selectedProjectSetting, input.ProjectID)
+	_, _ = s.ensureProjectMemory(ctx, currentProject)
 
 	task, err := s.store.GetActiveTask(ctx, input.ProjectID)
 	if err != nil {
@@ -448,10 +647,22 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	if !decision.NeedsWorkflow {
 		return s.answerDirect(ctx, currentProject, *task, latestRun, provider, model, content, decision)
 	}
+	useCTFWorkflow := decision.Intent == router.IntentPentestTask && s.shouldUseCTFWorkflow(ctx, input.ProjectID, content)
 
 	run, err := s.store.CreateWorkflowRun(ctx, task.ID)
 	if err != nil {
 		return ChatState{}, err
+	}
+	if decision.Intent == router.IntentClarificationAnswer {
+		_ = s.patchTaskSpec(ctx, taskspec.Spec{
+			ProjectID:     currentProject.ID,
+			TaskID:        task.ID,
+			WorkflowRunID: run.ID,
+			Status:        taskspec.StatusActive,
+			Source:        "clarification",
+		}, false)
+	} else {
+		_ = s.resetTaskSpecForWorkflow(ctx, currentProject, *task, run.ID, content)
 	}
 	s.emitWorkflowRun(run)
 	_ = s.createDynamicWorkflowPlan(ctx, currentProject, *task, run.ID, provider, model, content, decision.Intent)
@@ -462,6 +673,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		return ChatState{}, err
 	}
 	if decision.Intent == router.IntentPentestTask {
+		if useCTFWorkflow {
+			return s.runCTFWorkflow(ctx, input.ProjectID, currentProject, *task, &run, history, provider, model, content)
+		}
 		return s.runSecurityWorkflow(ctx, input.ProjectID, currentProject, *task, &run, history, provider, model, content)
 	}
 	if decision.Intent == router.IntentResearchTask {
@@ -546,6 +760,14 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		finalStatus = zw.StatusBlocked
 		finalError = autoResult.BlockReason
 	}
+	_ = s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:     currentProject.ID,
+		TaskID:        task.ID,
+		WorkflowRunID: run.ID,
+		Status:        taskSpecStatusFromWorkflow(finalStatus),
+		Source:        "workflow_final",
+	}, false)
+	_ = s.updateProjectMemoryFromWorkflow(ctx, currentProject.ID, task.ID, run.ID, result, autoResult)
 	if err := s.store.UpdateWorkflowRun(ctx, run.ID, finalStatus, zw.StepManagerFinal, finalError); err != nil {
 		return ChatState{}, err
 	}
@@ -578,9 +800,19 @@ func (s *Service) answerDirect(
 	s.emitChatState(ctx, currentProject.ID, "")
 
 	if wantsSavedTaskSpec(content) {
-		answer := s.savedTaskSpecAnswer(ctx, currentProject)
+		answer := s.savedTaskSpecAnswer(ctx, currentProject, &task)
 		if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, answer); err != nil {
 			s.setAgentStatus(agents.ManagerID, "failed", "Не удалось сохранить спеку", model.ID)
+			return ChatState{}, err
+		}
+		_ = s.store.TouchTask(ctx, task.ID)
+		s.resetAgentStatuses(model.ID)
+		return s.emitChatState(ctx, currentProject.ID, ""), nil
+	}
+	if wantsProjectMemory(content) {
+		answer := s.projectMemoryAnswer(ctx, currentProject)
+		if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, answer); err != nil {
+			s.setAgentStatus(agents.ManagerID, "failed", "Не удалось сохранить память проекта", model.ID)
 			return ChatState{}, err
 		}
 		_ = s.store.TouchTask(ctx, task.ID)
@@ -656,6 +888,23 @@ func (s *Service) createDynamicWorkflowPlan(
 	intent router.Intent,
 ) error {
 	plan, steps := fallbackWorkflowPlan(currentProject, task, workflowRunID, userMessage, intent)
+	if lifecycleSteps, ok := s.lifecyclePlanSteps(ctx, currentProject, workflowRunID, intent); ok {
+		steps = lifecycleSteps
+		if intent == router.IntentPentestTask && s.shouldUseCTFWorkflow(ctx, currentProject.ID, userMessage) {
+			_, _, err := s.store.CreateWorkflowPlan(ctx, plan, steps)
+			if err == nil {
+				s.emitChatState(ctx, currentProject.ID, "")
+			}
+			return err
+		}
+	}
+	if intent == router.IntentResearchTask {
+		_, _, err := s.store.CreateWorkflowPlan(ctx, plan, steps)
+		if err == nil {
+			s.emitChatState(ctx, currentProject.ID, "")
+		}
+		return err
+	}
 
 	planCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
@@ -672,6 +921,103 @@ func (s *Service) createDynamicWorkflowPlan(
 		s.emitChatState(ctx, currentProject.ID, "")
 	}
 	return err
+}
+
+func (s *Service) lifecycleExecutor(ctx context.Context, projectID string) (lifecycler.Executor, bool) {
+	definition, steps, err := s.store.ProjectLifecycle(ctx, projectID)
+	if err != nil || len(steps) == 0 {
+		return lifecycler.Executor{}, false
+	}
+	return lifecycler.NewExecutor(definition, steps), true
+}
+
+func (s *Service) lifecyclePlanSteps(ctx context.Context, currentProject project.Project, workflowRunID string, intent router.Intent) ([]zw.PlanStep, bool) {
+	executor, ok := s.lifecycleExecutor(ctx, currentProject.ID)
+	if !ok {
+		return nil, false
+	}
+	binding, err := s.store.ProjectGroupBinding(ctx, currentProject.ID)
+	if err != nil {
+		return nil, false
+	}
+	group, err := s.store.GetAgentGroup(ctx, binding.GroupID)
+	if err != nil {
+		return nil, false
+	}
+	if intent == router.IntentResearchTask && group.Kind != agentgroups.GroupKindResearch {
+		return nil, false
+	}
+	if intent == router.IntentPentestTask && group.Kind != agentgroups.GroupKindCTF && group.Kind != agentgroups.GroupKindSecurity {
+		return nil, false
+	}
+	profiles, err := s.store.ListAgentProfiles(ctx, binding.GroupID)
+	if err != nil {
+		return nil, false
+	}
+	profileByID := make(map[string]agentgroups.Profile, len(profiles))
+	for _, profile := range profiles {
+		profileByID[profile.ID] = profile
+	}
+	steps := executor.Steps()
+	out := make([]zw.PlanStep, 0, len(steps))
+	for _, step := range steps {
+		if !step.VisibleToUser {
+			continue
+		}
+		profile := profileByID[step.AgentProfileID]
+		out = append(out, zw.PlanStep{
+			StepKey:     step.StepKey,
+			Title:       step.Title,
+			Description: lifecycleStepDescription(step, profile),
+			AgentID:     normalizePlanAgent(profile.RoleKey),
+			Status:      zw.StepStatusQueued,
+			SortOrder:   len(out),
+		})
+	}
+	_ = intent
+	_ = workflowRunID
+	return out, len(out) > 0
+}
+
+func lifecycleStepDescription(step agentgroups.LifecycleStep, profile agentgroups.Profile) string {
+	parts := []string{}
+	if profile.Name != "" {
+		parts = append(parts, profile.Name)
+	}
+	if step.Mode != "" {
+		parts = append(parts, step.Mode)
+	}
+	if step.CanRetry {
+		parts = append(parts, fmt.Sprintf("retries %d", step.MaxRetries))
+	}
+	if step.OnFailureStepKey != "" {
+		parts = append(parts, "fallback: "+step.OnFailureStepKey)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (s *Service) shouldUseCTFWorkflow(ctx context.Context, projectID string, message string) bool {
+	binding, err := s.store.ProjectGroupBinding(ctx, projectID)
+	if err != nil {
+		return false
+	}
+	group, err := s.store.GetAgentGroup(ctx, binding.GroupID)
+	if err != nil {
+		return false
+	}
+	return group.Kind == agentgroups.GroupKindCTF && ctf.IsCTFRequest(message)
+}
+
+func (s *Service) maxRepairIterationsForProject(ctx context.Context, projectID string) int {
+	executor, ok := s.lifecycleExecutor(ctx, projectID)
+	if !ok {
+		return maxAutoRepairIterations
+	}
+	limit := executor.Definition().MaxRepairIterations
+	if limit <= 0 {
+		return maxAutoRepairIterations
+	}
+	return limit
 }
 
 func parseDynamicWorkflowPlan(raw string, currentProject project.Project, task chat.Task, workflowRunID string, intent router.Intent) (zw.Plan, []zw.PlanStep, bool) {
@@ -762,6 +1108,32 @@ func normalizePlanAgent(value string) string {
 		return agents.ReviewerID
 	case agents.SecurityID:
 		return agents.SecurityID
+	case agents.ResearcherID:
+		return agents.ResearcherID
+	case agents.SourceReviewID:
+		return agents.SourceReviewID
+	case agents.AnalystID:
+		return agents.AnalystID
+	case agents.CTFScoutID, "scout":
+		return agents.CTFScoutID
+	case agents.CTFWebID:
+		return agents.CTFWebID
+	case agents.CTFLFIID:
+		return agents.CTFLFIID
+	case agents.CTFRCEID:
+		return agents.CTFRCEID
+	case agents.CTFSQLiID:
+		return agents.CTFSQLiID
+	case agents.CTFPwnID:
+		return agents.CTFPwnID
+	case agents.CTFCryptoID:
+		return agents.CTFCryptoID
+	case agents.CTFReverseID:
+		return agents.CTFReverseID
+	case agents.CTFForensicsID:
+		return agents.CTFForensicsID
+	case agents.CTFValidatorID, "validator":
+		return agents.CTFValidatorID
 	default:
 		return agents.ManagerID
 	}
@@ -786,8 +1158,11 @@ func fallbackWorkflowPlan(currentProject project.Project, task chat.Task, workfl
 	switch intent {
 	case router.IntentResearchTask:
 		specs = []zw.PlanStep{
-			{StepKey: zw.StepWebResearch, Title: "Найти источники", Description: "Собрать актуальную информацию и проверить страницы", AgentID: agents.ManagerID},
-			{StepKey: zw.StepManagerFinal, Title: "Собрать ответ", Description: "Сформировать выводы со ссылками на источники", AgentID: agents.ManagerID},
+			{StepKey: zw.StepWebResearch, Title: "Поиск", Description: "Сформировать запросы и собрать публичные источники", AgentID: agents.ResearcherID},
+			{StepKey: zw.StepResearchSourceReview, Title: "Источники", Description: "Проверить свежесть, доверие и противоречия", AgentID: agents.SourceReviewID},
+			{StepKey: zw.StepResearchSynthesis, Title: "Аналитика", Description: "Сравнить источники и отделить факты от выводов", AgentID: agents.AnalystID},
+			{StepKey: zw.StepResearchNotes, Title: "Research notes", Description: "Сохранить заметки исследования в проект", AgentID: agents.ResearcherID},
+			{StepKey: zw.StepManagerFinal, Title: "Итог", Description: "Дать короткий ответ со ссылками", AgentID: agents.ManagerID},
 		}
 	case router.IntentPentestTask:
 		specs = []zw.PlanStep{
@@ -828,6 +1203,8 @@ func (s *Service) runWebResearchWorkflow(
 	if !settings.Enabled {
 		message := "## Web research выключен\n\nВключи поиск в настройках, и я смогу искать актуальную информацию в интернете с сохранением источников."
 		_, _ = s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, message)
+		_ = s.patchTaskSpec(ctx, taskspec.Spec{ProjectID: currentProject.ID, TaskID: task.ID, WorkflowRunID: run.ID, Status: taskspec.StatusBlocked, Decisions: []string{"Web research выключен в настройках."}, Source: "web_research"}, false)
+		_ = s.patchProjectMemory(ctx, projectmemory.Memory{ProjectID: currentProject.ID, UpdatedFromTaskID: task.ID, Environment: []string{"Web research был выключен в настройках."}})
 		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepWebResearch, "web research выключен")
 		_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusBlocked, "web research выключен")
 		s.setAgentStatus(agents.ManagerID, "failed", "Web research выключен", model.ID)
@@ -840,16 +1217,18 @@ func (s *Service) runWebResearchWorkflow(
 	}
 	plan := webresearch.ParsePlan(planOutput, userMessage)
 
-	s.setAgentStatus(agents.ManagerID, "searching_web", "Ищет источники в интернете", model.ID)
+	s.setAgentStatus(agents.ResearcherID, "searching_web", "Ищет источники в интернете", model.ID)
 	searchCtx, cancel := context.WithTimeout(ctx, time.Duration(settings.TimeoutSeconds*settings.MaxPagesPerWorkflow+6)*time.Second)
 	sources, searchErr := webresearch.NewClient(time.Duration(settings.TimeoutSeconds)*time.Second).Research(searchCtx, plan, settings)
 	cancel()
 	if searchErr != nil {
 		message := fmt.Sprintf("## Не нашла источники\n\n%s", searchErr.Error())
 		_, _ = s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, message)
+		_ = s.patchTaskSpec(ctx, taskspec.Spec{ProjectID: currentProject.ID, TaskID: task.ID, WorkflowRunID: run.ID, Status: taskspec.StatusBlocked, Decisions: []string{"Источники не найдены: " + searchErr.Error()}, Source: "web_research"}, false)
+		_ = s.patchProjectMemory(ctx, projectmemory.Memory{ProjectID: currentProject.ID, UpdatedFromTaskID: task.ID, Environment: []string{"Последний web research не нашел источники: " + searchErr.Error()}})
 		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepWebResearch, searchErr.Error())
 		_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusBlocked, searchErr.Error())
-		s.setAgentStatus(agents.ManagerID, "failed", "Не нашла источники", model.ID)
+		s.setAgentStatus(agents.ResearcherID, "failed", "Не нашла источники", model.ID)
 		return s.emitChatState(ctx, projectID, ""), nil
 	}
 
@@ -857,61 +1236,61 @@ func (s *Service) runWebResearchWorkflow(
 		source.ProjectID = currentProject.ID
 		source.TaskID = task.ID
 		source.WorkflowRunID = run.ID
-		source.AgentID = agents.ManagerID
+		source.AgentID = agents.ResearcherID
 		_, _ = s.store.CreateWebSource(ctx, source)
 	}
 
-	answerCtx, answerCancel := context.WithTimeout(ctx, 90*time.Second)
-	defer answerCancel()
-	s.setAgentStatus(agents.ManagerID, "answering", "Собирает ответ по источникам", model.ID)
-	resp, err := provider.Generate(answerCtx, llm.Request{
-		Model: model.ModelName,
-		Messages: []llm.Message{
-			{
-				Role: "system",
-				Content: agents.WithDefaultSkills(`
-Ты Люмен, входной агент локального AI-завода.
-Отвечай на русском языке. Говори о себе в женском роде: "нашла", "проверила", "собрала".
-Сейчас режим Web Research: отвечай только на основе найденных источников и явно отделяй выводы от фактов.
-Не выводи сырой JSON. Не утверждай, что меняла файлы или запускала проверки.
-Если источников мало или они слабые, скажи об этом прямо.
-Формат:
-## Коротко
-## Детали
-## Источники
-`),
-			},
-			{
-				Role:    "user",
-				Content: buildWebResearchAnswerInput(userMessage, currentProject, plan, sources),
-			},
-		},
-		Temperature: 0.2,
-		MaxTokens:   1600,
-	})
+	sourceReview, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepResearchSourceReview, buildResearchSourceReviewInput(userMessage, currentProject, plan, sources))
 	if err != nil {
-		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepWebResearch, model.ID, err), nil
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepResearchSourceReview, model.ID, err), nil
 	}
-	answer := strings.TrimSpace(resp.Content)
+	synthesis, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepResearchSynthesis, buildResearchSynthesisInput(userMessage, currentProject, plan, sources, sourceReview))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepResearchSynthesis, model.ID, err), nil
+	}
+	notes, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepResearchNotes, buildResearchNotesInput(userMessage, currentProject, plan, sources, sourceReview, synthesis))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepResearchNotes, model.ID, err), nil
+	}
+	notesPath, notesErr := s.saveResearchNotes(ctx, currentProject, task, run.ID, notes)
+	if notesErr != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepResearchNotes, model.ID, notesErr), nil
+	}
+
+	answer := strings.TrimSpace(synthesis)
 	if answer == "" {
 		answer = webResearchFallbackAnswer(sources)
 	}
-	if looksLikeRepetitionLoop(answer) || len(answer) > managerMaxAnswerBytes {
+	if looksLikeRepetitionLoop(answer) || looksLikeRawJSONAnswer(answer) || len(answer) > managerMaxAnswerBytes {
 		answer = webResearchFallbackAnswer(sources)
 	}
-	if !strings.Contains(strings.ToLower(answer), "источник") {
-		answer += "\n\n" + webResearchSourcesSection(sources)
+	if notesPath != "" && !strings.Contains(answer, "research-notes.md") {
+		answer += "\n\nЗаметки исследования сохранены: `" + notesPath + "`."
 	}
-	if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, answer); err != nil {
-		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusFailed, zw.StepWebResearch, err.Error())
+	_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, zw.StepManagerFinal, agents.ManagerID, zw.StepStatusDone, "")
+	_ = s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:     currentProject.ID,
+		TaskID:        task.ID,
+		WorkflowRunID: run.ID,
+		Decisions:     []string{fmt.Sprintf("Research Squad выполнила поиск: найдено источников %d.", len(sources)), "Research notes сохранены: " + notesPath},
+		Status:        taskspec.StatusDone,
+		Source:        "research_squad",
+	}, false)
+	_ = s.patchProjectMemory(ctx, projectmemory.Memory{
+		ProjectID:         currentProject.ID,
+		UpdatedFromTaskID: task.ID,
+		Decisions:         []string{fmt.Sprintf("Research Squad использовалась для проекта; последний успешный поиск нашел источников: %d.", len(sources)), "Research notes: " + notesPath},
+	})
+	if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.AnalystID, answer); err != nil {
+		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusFailed, zw.StepManagerFinal, err.Error())
 		return ChatState{}, err
 	}
-	if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusDone, zw.StepWebResearch, ""); err != nil {
+	if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusDone, zw.StepManagerFinal, ""); err != nil {
 		return ChatState{}, err
 	}
 	_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusDone, "")
 	run.Status = zw.StatusDone
-	run.CurrentStep = zw.StepWebResearch
+	run.CurrentStep = zw.StepManagerFinal
 	run.FinishedAt = nowString()
 	run.Error = ""
 	s.emitWorkflowRun(*run)
@@ -936,6 +1315,20 @@ func (s *Service) runSecurityWorkflow(
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepSecurityAnalysis, model.ID, err), nil
 	}
+	_ = s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:     currentProject.ID,
+		TaskID:        task.ID,
+		WorkflowRunID: run.ID,
+		Requirements:  []string{"Сформировать защитный ИБ-анализ по доступному проектному контексту."},
+		Decisions:     []string{"ИБ-задача обработана отдельным security workflow."},
+		Status:        taskspec.StatusDone,
+		Source:        "security_workflow",
+	}, false)
+	_ = s.patchProjectMemory(ctx, projectmemory.Memory{
+		ProjectID:         currentProject.ID,
+		UpdatedFromTaskID: task.ID,
+		Decisions:         []string{"Проект поддерживает отдельный security workflow для ИБ-задач."},
+	})
 	if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.SecurityID, output); err != nil {
 		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusFailed, zw.StepSecurityAnalysis, err.Error())
 		s.setAgentStatus(agents.SecurityID, "failed", "Не удалось сохранить ИБ-ответ", model.ID)
@@ -953,6 +1346,171 @@ func (s *Service) runSecurityWorkflow(
 	s.emitWorkflowRun(*run)
 	s.resetAgentStatuses(model.ID)
 	return s.emitChatState(ctx, projectID, ""), nil
+}
+
+func (s *Service) runCTFWorkflow(
+	ctx context.Context,
+	projectID string,
+	currentProject project.Project,
+	task chat.Task,
+	run *zw.Run,
+	history []chat.Message,
+	provider llm.Provider,
+	model llm.ModelConfig,
+	userMessage string,
+) (ChatState, error) {
+	category := ctf.Classify(userMessage)
+	workspace, err := ctf.PrepareWorkspace(currentProject.Path, task.Title, userMessage, category, time.Now())
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFIntake, model.ID, err), nil
+	}
+	_ = s.createCTFArtifacts(ctx, currentProject, task, run.ID, workspace)
+
+	intake, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFIntake, buildCTFIntakeInput(userMessage, currentProject, history, workspace))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFIntake, model.ID, err), nil
+	}
+	scopeOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFScopeCheck, buildCTFScopeInput(userMessage, currentProject, workspace, intake))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFScopeCheck, model.ID, err), nil
+	}
+	_ = ctf.AppendNotes(currentProject.Path, workspace, map[string]string{
+		"Intake": intake,
+		"Scope":  scopeOutput,
+	})
+
+	if workspace.RequiresScope {
+		answer := ctfScopeRequiredAnswer(workspace)
+		_ = s.patchTaskSpec(ctx, taskspec.Spec{
+			ProjectID:     currentProject.ID,
+			TaskID:        task.ID,
+			WorkflowRunID: run.ID,
+			Requirements:  []string{"Перед активными сетевыми действиями нужен явный CTF/lab scope."},
+			OpenQuestions: []string{"Подтверди scope и разрешенные цели для CTF/lab проверки."},
+			Decisions:     []string{"CTF workflow остановлен на scope gate."},
+			Status:        taskspec.StatusWaitingClarification,
+			Source:        "ctf_scope",
+		}, true)
+		_ = s.patchProjectMemory(ctx, projectmemory.Memory{
+			ProjectID:         currentProject.ID,
+			UpdatedFromTaskID: task.ID,
+			Decisions:         []string{"CTF workflow использует scope gate перед активными сетевыми действиями."},
+			Environment:       []string{"CTF workspace: " + workspace.RelativeRoot},
+		})
+		if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.CTFScoutID, answer); err != nil {
+			_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusFailed, zw.StepCTFScopeCheck, err.Error())
+			return ChatState{}, err
+		}
+		if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusWaitingUser, zw.StepCTFScopeCheck, "нужен scope для активных сетевых действий"); err != nil {
+			return ChatState{}, err
+		}
+		_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusWaitingUser, "нужен scope")
+		run.Status = zw.StatusWaitingUser
+		run.CurrentStep = zw.StepCTFScopeCheck
+		run.FinishedAt = nowString()
+		run.Error = "нужен scope"
+		s.emitWorkflowRun(*run)
+		s.setAgentStatus(agents.CTFScoutID, "waiting_user", "Ждет подтверждение scope", model.ID)
+		_ = s.store.TouchTask(ctx, task.ID)
+		return s.emitChatState(ctx, projectID, ""), nil
+	}
+
+	artifactsOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFArtifactCollection, buildCTFArtifactInput(userMessage, currentProject, workspace, intake, scopeOutput))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFArtifactCollection, model.ID, err), nil
+	}
+	triageOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFTriage, buildCTFTriageInput(userMessage, currentProject, workspace, artifactsOutput))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFTriage, model.ID, err), nil
+	}
+	hypothesisOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFHypothesisBoard, buildCTFHypothesisInput(workspace, intake, scopeOutput, triageOutput))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFHypothesisBoard, model.ID, err), nil
+	}
+	solverSpec := agents.CTFSolverSpec(category)
+	solverOutput, err := s.runWorkflowStepWithSpec(ctx, projectID, task.ID, run, provider, model, zw.StepCTFCategorySolver, solverSpec, buildCTFSolverInput(userMessage, currentProject, workspace, intake, scopeOutput, artifactsOutput, triageOutput, hypothesisOutput))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFCategorySolver, model.ID, err), nil
+	}
+	validationOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFValidation, buildCTFValidationInput(workspace, solverOutput))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFValidation, model.ID, err), nil
+	}
+	writeupOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFWriteup, buildCTFWriteupInput(workspace, intake, scopeOutput, artifactsOutput, triageOutput, hypothesisOutput, solverOutput, validationOutput))
+	if err != nil {
+		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFWriteup, model.ID, err), nil
+	}
+	_ = ctf.AppendNotes(currentProject.Path, workspace, map[string]string{
+		"Artifacts":  artifactsOutput,
+		"Triage":     triageOutput,
+		"Hypotheses": hypothesisOutput,
+		"Solver":     solverOutput,
+		"Validation": validationOutput,
+	})
+	_ = ctf.WriteWriteup(currentProject.Path, workspace, writeupOutput)
+
+	answer := ctfDoneAnswer(workspace, solverSpec.Name)
+	_ = s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:     currentProject.ID,
+		TaskID:        task.ID,
+		WorkflowRunID: run.ID,
+		Requirements:  []string{"Решить CTF challenge в выбранной категории и сохранить writeup."},
+		Decisions:     []string{"CTF category: " + string(category), "Solver: " + solverSpec.Name, "Writeup сохранен: " + workspace.WriteupMD},
+		Status:        taskspec.StatusDone,
+		Source:        "ctf_workflow",
+	}, false)
+	_ = s.patchProjectMemory(ctx, projectmemory.Memory{
+		ProjectID:         currentProject.ID,
+		UpdatedFromTaskID: task.ID,
+		Stack:             "ctf",
+		Decisions:         []string{"CTF category: " + string(category), "CTF solver: " + solverSpec.Name, "CTF writeup path: " + workspace.WriteupMD},
+		Environment:       []string{"CTF workspace: " + workspace.RelativeRoot},
+	})
+	if _, err := s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, answer); err != nil {
+		_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusFailed, zw.StepCTFWriteup, err.Error())
+		return ChatState{}, err
+	}
+	if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusDone, zw.StepCTFWriteup, ""); err != nil {
+		return ChatState{}, err
+	}
+	_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusDone, "")
+	run.Status = zw.StatusDone
+	run.CurrentStep = zw.StepCTFWriteup
+	run.FinishedAt = nowString()
+	run.Error = ""
+	s.emitWorkflowRun(*run)
+	_ = s.store.TouchTask(ctx, task.ID)
+	s.resetAgentStatuses(model.ID)
+	return s.emitChatState(ctx, projectID, ""), nil
+}
+
+func (s *Service) createCTFArtifacts(ctx context.Context, currentProject project.Project, task chat.Task, workflowRunID string, workspace ctf.Workspace) error {
+	items := []struct {
+		kind  string
+		title string
+		path  string
+	}{
+		{kind: "ctf_challenge", title: "CTF challenge", path: workspace.ChallengeYAML},
+		{kind: "ctf_scope", title: "CTF scope", path: workspace.ScopeMD},
+		{kind: "ctf_notes", title: "CTF notes", path: workspace.NotesMD},
+		{kind: "ctf_writeup", title: "CTF writeup", path: workspace.WriteupMD},
+	}
+	for _, item := range items {
+		_, err := s.store.CreateArtifact(ctx, artifacts.Artifact{
+			ProjectID:     currentProject.ID,
+			TaskID:        task.ID,
+			WorkflowRunID: workflowRunID,
+			AgentID:       agents.ManagerID,
+			Kind:          item.kind,
+			Title:         item.title,
+			Path:          filepath.Join(currentProject.Path, item.path),
+			RelativePath:  item.path,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) classifyIntentWithModel(
@@ -1047,6 +1605,15 @@ func (s *Service) SubmitClarification(ctx context.Context, input SubmitClarifica
 	if run == nil || run.ID != workflowRunID || run.Status != zw.StatusWaitingUser {
 		return ChatState{}, fmt.Errorf("активного уточнения не найдено")
 	}
+	_ = s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:       projectID,
+		TaskID:          task.ID,
+		WorkflowRunID:   workflowRunID,
+		AcceptedAnswers: taskSpecAnswersFromClarifications(answers),
+		OpenQuestions:   []string{},
+		Status:          taskspec.StatusActive,
+		Source:          "clarification_answers",
+	}, true)
 	return s.SendMessage(ctx, SendMessageInput{
 		ProjectID: projectID,
 		Content:   clarificationAnswersMessage(answers),
@@ -1119,6 +1686,67 @@ func (s *Service) ApplyWorkflowChanges(ctx context.Context, input ApplyWorkflowC
 	return state, nil
 }
 
+func (s *Service) RollbackWorkflowChanges(ctx context.Context, input RollbackWorkflowChangesInput) (ChatState, error) {
+	projectID := strings.TrimSpace(input.ProjectID)
+	workflowRunID := strings.TrimSpace(input.WorkflowRunID)
+	if projectID == "" || workflowRunID == "" {
+		return ChatState{}, fmt.Errorf("project_id и workflow_run_id обязательны")
+	}
+	currentProject, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		return ChatState{}, err
+	}
+	items, err := s.store.ListProposedChanges(ctx, projectID, workflowRunID, 200)
+	if err != nil {
+		return ChatState{}, err
+	}
+	applied := make([]changes.ProposedChange, 0, len(items))
+	for _, item := range items {
+		if item.Status == changes.StatusApplied {
+			applied = append(applied, item)
+		}
+	}
+	if len(applied) == 0 {
+		return s.emitChatState(ctx, projectID, ""), nil
+	}
+
+	model, modelErr := s.store.ActiveModelConfig(ctx)
+	if modelErr == nil {
+		s.setAgentStatus(agents.DeveloperID, "writing_files", "Откатывает изменения workflow", model.ID)
+	}
+
+	rolledBack := 0
+	failed := 0
+	taskID := applied[0].TaskID
+	for _, change := range applied {
+		result, err := changes.Rollback(currentProject.Path, change)
+		if err != nil {
+			failed++
+			_ = s.store.MarkProposedChangeFailed(ctx, change.ID, "rollback: "+err.Error())
+			continue
+		}
+		rolledBack++
+		_ = s.store.MarkProposedChangeRolledBack(ctx, change.ID, result.DiffText)
+	}
+	if taskID != "" {
+		_, _ = s.store.AddMessage(ctx, taskID, "agent", agents.DeveloperID, rollbackChangesMessage(rolledBack, failed))
+		_ = s.store.TouchTask(ctx, taskID)
+		_ = s.patchProjectMemory(ctx, projectmemory.Memory{
+			ProjectID:         currentProject.ID,
+			UpdatedFromTaskID: taskID,
+			Environment:       []string{fmt.Sprintf("Rollback workflow %s: откатано %d, ошибок %d.", workflowRunID, rolledBack, failed)},
+		})
+	}
+	if modelErr == nil {
+		if failed > 0 {
+			s.setAgentStatus(agents.DeveloperID, "failed", "Часть изменений не откатилась", model.ID)
+		} else {
+			s.setAgentStatus(agents.DeveloperID, "done", "Изменения откатаны", model.ID)
+		}
+	}
+	return s.emitChatState(ctx, projectID, ""), nil
+}
+
 type autopilotResult struct {
 	AppliedFiles   int
 	FailedFiles    int
@@ -1141,8 +1769,9 @@ func (s *Service) runAutopilot(ctx context.Context, project project.Project, tas
 		return result
 	}
 
+	maxRepairIterations := s.maxRepairIterationsForProject(ctx, project.ID)
 	previousDeveloperOutput := ""
-	for iteration := 0; iteration <= maxAutoRepairIterations; iteration++ {
+	for iteration := 0; iteration <= maxRepairIterations; iteration++ {
 		result.Iterations = iteration + 1
 		applied, failed, err := s.applyPendingChangesNow(ctx, project, task, run.ID, model.ID, true)
 		result.AppliedFiles += applied
@@ -1154,7 +1783,7 @@ func (s *Service) runAutopilot(ctx context.Context, project project.Project, tas
 			return result
 		}
 		if failed > 0 {
-			if iteration >= maxAutoRepairIterations {
+			if iteration >= maxRepairIterations {
 				result.Blocked = true
 				result.BlockReason = "часть изменений не применена, лимит repair-итераций исчерпан"
 				_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, run.CurrentStep, result.BlockReason)
@@ -1208,6 +1837,60 @@ func (s *Service) runAutopilot(ctx context.Context, project project.Project, tas
 		result.TestsPassed = passed
 		result.TestsFailed = failedTests
 		result.TestsBlocked = blockedTests
+		if failedTests+blockedTests > 0 {
+			testRuns, _ := s.store.ListTestRuns(ctx, project.ID, run.ID, 30)
+			parsed, ok := repairloop.ReviewFromTests(testRuns)
+			if ok {
+				result.ReviewStatus = parsed.Status
+				result.ReviewReturnTo = parsed.ReturnTo
+				result.ReviewSummary = strings.TrimSpace(parsed.Summary)
+				result.ReviewFindings = parsed.Findings
+				result.ReviewRequired = parsed.RequiredChanges
+				if parsed.Status == reviews.StatusBlocked || parsed.ReturnTo == reviews.ReturnToUser {
+					result.Blocked = true
+					result.BlockReason = reviewBlockedReason(parsed)
+					_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepTesterCommands, result.BlockReason)
+					return result
+				}
+				if iteration >= maxRepairIterations {
+					result.Blocked = true
+					result.BlockReason = "исчерпан лимит repair-итераций: последние проверки все еще требуют доработку"
+					_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepTesterCommands, result.BlockReason)
+					return result
+				}
+				developer, err := s.rerunFromReview(ctx, result, project, task, run, provider, model, workflow, parsed)
+				if err != nil {
+					result.Blocked = true
+					result.BlockReason = err.Error()
+					_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepTesterCommands, result.BlockReason)
+					return result
+				}
+				if developer == "" {
+					continue
+				}
+				if strings.TrimSpace(developer) == strings.TrimSpace(previousDeveloperOutput) {
+					result.Blocked = true
+					result.BlockReason = "repair-итерация повторила тот же ответ разработчика"
+					_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepDeveloperPlan, result.BlockReason)
+					return result
+				}
+				previousDeveloperOutput = developer
+				newChanges, err := s.saveProposedChanges(ctx, project, task, run.ID, developer)
+				if err != nil {
+					result.Blocked = true
+					result.BlockReason = "не удалось сохранить repair-изменения: " + err.Error()
+					_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepDeveloperPlan, result.BlockReason)
+					return result
+				}
+				if len(newChanges) == 0 {
+					result.Blocked = true
+					result.BlockReason = "разработчик не вернул structured changes для исправления"
+					_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepDeveloperPlan, result.BlockReason)
+					return result
+				}
+				continue
+			}
+		}
 
 		parsed, err := s.runReviewNow(ctx, project, task, run, provider, model, iteration+1)
 		if err != nil {
@@ -1230,7 +1913,7 @@ func (s *Service) runAutopilot(ctx context.Context, project project.Project, tas
 			_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepReview, result.BlockReason)
 			return result
 		}
-		if iteration >= maxAutoRepairIterations {
+		if iteration >= maxRepairIterations {
 			result.Blocked = true
 			result.BlockReason = "исчерпан лимит repair-итераций: последнее ревью все еще требует доработку"
 			_ = s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusBlocked, zw.StepReview, result.BlockReason)
@@ -1323,6 +2006,7 @@ func (s *Service) rerunFromBlueprint(
 		return "", fmt.Errorf("repair-итерация Task Blueprint вернула невалидный JSON: %w", err)
 	}
 	parsedBlueprint = blueprint.NormalizeForProject(parsedBlueprint, project.Path)
+	parsedBlueprint = devworkspace.NormalizeBlueprint(parsedBlueprint, project.Path)
 	parsedBlueprint.ProjectID = project.ID
 	parsedBlueprint.TaskID = task.ID
 	parsedBlueprint.WorkflowRunID = run.ID
@@ -1369,7 +2053,7 @@ func (s *Service) applyPendingChangesNow(ctx context.Context, project project.Pr
 			_ = s.store.MarkProposedChangeFailed(ctx, change.ID, "изменение относится к другому проекту")
 			continue
 		}
-		result, err := changes.Apply(project.Path, change)
+		result, err := s.applyDevPipelineChange(ctx, project.Path, change)
 		if err != nil {
 			failed++
 			_ = s.store.MarkProposedChangeFailed(ctx, change.ID, err.Error())
@@ -1390,6 +2074,32 @@ func (s *Service) applyPendingChangesNow(ctx context.Context, project project.Pr
 	}
 	s.emitChatState(ctx, project.ID, "")
 	return applied, failed, nil
+}
+
+func (s *Service) applyDevPipelineChange(ctx context.Context, projectPath string, change changes.ProposedChange) (changes.ApplyResult, error) {
+	result, err := changes.Apply(projectPath, change)
+	if err != nil {
+		return changes.ApplyResult{}, err
+	}
+	relativePath := filepath.ToSlash(strings.Trim(change.FilePath, "/"))
+	if filepath.Ext(relativePath) != ".go" {
+		return result, nil
+	}
+	targetPath := filepath.Join(projectPath, relativePath)
+	formatCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(formatCtx, "gofmt", "-w", targetPath)
+	cmd.Dir = projectPath
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return result, fmt.Errorf("gofmt не прошел для %s: %v: %s", relativePath, err, strings.TrimSpace(string(output)))
+	}
+	formatted, err := os.ReadFile(targetPath)
+	if err != nil {
+		return result, err
+	}
+	result.AfterContent = string(formatted)
+	result.DiffText = changes.GenerateUnifiedDiff(relativePath, result.BeforeContent, result.AfterContent)
+	return result, nil
 }
 
 func (s *Service) RunTestCommand(ctx context.Context, input RunTestCommandInput) (ChatState, error) {
@@ -1432,8 +2142,8 @@ func (s *Service) RunTestCommand(ctx context.Context, input RunTestCommandInput)
 		s.setAgentStatus(agents.TesterID, "done", "Проверка прошла", modelID)
 		_ = s.store.FinishWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID, zw.StepStatusDone, "")
 	} else if result.Status == checks.StatusBlocked {
-		s.setAgentStatus(agents.TesterID, "failed", "Команда заблокирована allowlist", modelID)
-		_ = s.store.FinishWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID, zw.StepStatusFailed, "команда заблокирована allowlist")
+		s.setAgentStatus(agents.TesterID, "failed", "Команда заблокирована policy", modelID)
+		_ = s.store.FinishWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID, zw.StepStatusFailed, "команда заблокирована execution policy")
 	} else {
 		s.setAgentStatus(agents.TesterID, "failed", "Проверка завершилась ошибкой", modelID)
 		_ = s.store.FinishWorkflowPlanStep(ctx, testRun.WorkflowRunID, zw.StepTesterCommands, agents.TesterID, zw.StepStatusFailed, result.Error)
@@ -1574,6 +2284,9 @@ func (s *Service) runReviewNow(ctx context.Context, currentProject project.Proje
 		s.setAgentStatus(agents.ReviewerID, "failed", "Ревьюер вернул невалидный JSON", model.ID)
 		return reviews.ParsedReview{}, parseErr
 	}
+	parsed = repairloop.NormalizeReviewForAutopilot(parsed)
+	parsed = reviewgate.Enforce(parsed, s.reviewGateReport(ctx, currentProject, run.ID))
+	parsed = repairloop.NormalizeReviewForAutopilot(parsed)
 
 	if err := s.store.FinishReviewRun(ctx, reviewRun.ID, parsed, ""); err != nil {
 		return reviews.ParsedReview{}, err
@@ -1699,6 +2412,491 @@ func (s *Service) SaveWebSettings(ctx context.Context, input SaveWebSettingsInpu
 	return settings, nil
 }
 
+func (s *Service) ListAgentGroups(ctx context.Context) ([]AgentGroupDTO, error) {
+	return s.store.ListAgentGroups(ctx, false)
+}
+
+func (s *Service) CreateAgentGroup(ctx context.Context, input CreateAgentGroupInput) ([]AgentGroupDTO, error) {
+	defaultModelID := strings.TrimSpace(input.DefaultModelID)
+	if defaultModelID == "" {
+		model, err := s.store.ActiveModelConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defaultModelID = model.ID
+	}
+	if _, err := s.store.CreateAgentGroup(ctx, agentgroups.Group{
+		Name:           input.Name,
+		Kind:           input.Kind,
+		Description:    input.Description,
+		DefaultModelID: defaultModelID,
+	}); err != nil {
+		return nil, err
+	}
+	return s.store.ListAgentGroups(ctx, false)
+}
+
+func (s *Service) UpdateAgentGroup(ctx context.Context, input UpdateAgentGroupInput) ([]AgentGroupDTO, error) {
+	if _, err := s.store.UpdateAgentGroup(ctx, agentgroups.Group{
+		ID:             input.ID,
+		Name:           input.Name,
+		Kind:           input.Kind,
+		Description:    input.Description,
+		DefaultModelID: input.DefaultModelID,
+	}); err != nil {
+		return nil, err
+	}
+	return s.store.ListAgentGroups(ctx, false)
+}
+
+func (s *Service) ArchiveAgentGroup(ctx context.Context, input ArchiveAgentGroupInput) ([]AgentGroupDTO, error) {
+	if err := s.store.ArchiveAgentGroup(ctx, input.GroupID); err != nil {
+		return nil, err
+	}
+	return s.store.ListAgentGroups(ctx, false)
+}
+
+func (s *Service) ListAgentProfiles(ctx context.Context, groupID string) ([]AgentProfileDTO, error) {
+	return s.store.ListAgentProfiles(ctx, groupID)
+}
+
+func (s *Service) SaveAgentProfile(ctx context.Context, input SaveAgentProfileInput) ([]AgentProfileDTO, error) {
+	profile := agentgroups.Profile{
+		ID:            input.ID,
+		GroupID:       input.GroupID,
+		Name:          input.Name,
+		RoleKey:       input.RoleKey,
+		Description:   input.Description,
+		AvatarPath:    input.AvatarPath,
+		SoulPath:      input.SoulPath,
+		ModelID:       input.ModelID,
+		ToolProfileID: input.ToolProfileID,
+		Capabilities:  input.Capabilities,
+		AllowedTools:  input.AllowedTools,
+		ReadPaths:     input.ReadPaths,
+		WritePaths:    input.WritePaths,
+		HandoffRules:  input.HandoffRules,
+		Temperature:   input.Temperature,
+		ContextBudget: input.ContextBudget,
+		Enabled:       input.Enabled,
+		SortOrder:     input.SortOrder,
+	}
+	saved, err := s.store.SaveAgentProfile(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.ensureSoulFile(ctx, saved); err != nil {
+		return nil, err
+	}
+	return s.store.ListAgentProfiles(ctx, saved.GroupID)
+}
+
+func (s *Service) SetAgentProfileEnabled(ctx context.Context, input SetAgentProfileEnabledInput) ([]AgentProfileDTO, error) {
+	profileID := strings.TrimSpace(input.ProfileID)
+	if profileID == "" {
+		return nil, fmt.Errorf("profile_id пустой")
+	}
+	if err := s.store.SetAgentProfileEnabled(ctx, profileID, input.Enabled); err != nil {
+		return nil, err
+	}
+	groups, err := s.store.ListAgentGroups(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, group := range groups {
+		profiles, err := s.store.ListAgentProfiles(ctx, group.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, profile := range profiles {
+			if profile.ID == profileID {
+				return profiles, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("агент %s не найден", profileID)
+}
+
+func (s *Service) GetAgentSoul(ctx context.Context, profileID string) (AgentSoulDTO, error) {
+	profile, err := s.store.GetAgentProfile(ctx, profileID)
+	if err != nil {
+		return AgentSoulDTO{}, err
+	}
+	path, err := s.ensureSoulFile(ctx, profile)
+	if err != nil {
+		return AgentSoulDTO{}, err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return AgentSoulDTO{}, err
+	}
+	return AgentSoulDTO{
+		ProfileID: profile.ID,
+		Path:      path,
+		Content:   string(content),
+		Warnings:  soulWarnings(string(content)),
+	}, nil
+}
+
+func (s *Service) SaveAgentSoul(ctx context.Context, input SaveAgentSoulInput) (AgentSoulDTO, error) {
+	content := strings.TrimSpace(input.Content)
+	if content == "" {
+		return AgentSoulDTO{}, fmt.Errorf("soul.md пустой")
+	}
+	profile, err := s.store.GetAgentProfile(ctx, input.ProfileID)
+	if err != nil {
+		return AgentSoulDTO{}, err
+	}
+	path, err := s.ensureSoulFile(ctx, profile)
+	if err != nil {
+		return AgentSoulDTO{}, err
+	}
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return AgentSoulDTO{}, err
+	}
+	return AgentSoulDTO{
+		ProfileID: profile.ID,
+		Path:      path,
+		Content:   content,
+		Warnings:  soulWarnings(content),
+	}, nil
+}
+
+func (s *Service) ListLifecycleDefinitions(ctx context.Context, groupID string) ([]LifecycleDefinitionDTO, error) {
+	return s.store.ListLifecycleDefinitions(ctx, groupID)
+}
+
+func (s *Service) ListLifecycleSteps(ctx context.Context, lifecycleID string) ([]LifecycleStepDTO, error) {
+	return s.store.ListLifecycleSteps(ctx, lifecycleID)
+}
+
+func (s *Service) SaveLifecycleDefinition(ctx context.Context, input SaveLifecycleDefinitionInput) ([]LifecycleDefinitionDTO, error) {
+	saved, err := s.store.SaveLifecycleDefinition(ctx, agentgroups.LifecycleDefinition{
+		ID:                  input.ID,
+		GroupID:             input.GroupID,
+		Name:                input.Name,
+		Kind:                input.Kind,
+		Description:         input.Description,
+		MaxTotalIterations:  input.MaxTotalIterations,
+		MaxRepairIterations: input.MaxRepairIterations,
+		SameErrorLimit:      input.SameErrorLimit,
+		Status:              input.Status,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ListLifecycleDefinitions(ctx, saved.GroupID)
+}
+
+func (s *Service) SaveLifecycleStep(ctx context.Context, input SaveLifecycleStepInput) ([]LifecycleStepDTO, error) {
+	saved, err := s.store.SaveLifecycleStep(ctx, agentgroups.LifecycleStep{
+		ID:               input.ID,
+		LifecycleID:      input.LifecycleID,
+		StepKey:          input.StepKey,
+		Title:            input.Title,
+		AgentProfileID:   input.AgentProfileID,
+		Mode:             input.Mode,
+		Required:         input.Required,
+		CanRetry:         input.CanRetry,
+		MaxRetries:       input.MaxRetries,
+		OnSuccessStepKey: input.OnSuccessStepKey,
+		OnFailureStepKey: input.OnFailureStepKey,
+		OutputSchema:     input.OutputSchema,
+		VisibleToUser:    input.VisibleToUser,
+		SortOrder:        input.SortOrder,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ListLifecycleSteps(ctx, saved.LifecycleID)
+}
+
+func (s *Service) DeleteLifecycleStep(ctx context.Context, input DeleteLifecycleStepInput) ([]LifecycleStepDTO, error) {
+	if strings.TrimSpace(input.StepID) == "" {
+		return nil, errors.New("step id is required")
+	}
+	if err := s.store.DeleteLifecycleStep(ctx, input.StepID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(input.LifecycleID) == "" {
+		return []LifecycleStepDTO{}, nil
+	}
+	return s.store.ListLifecycleSteps(ctx, input.LifecycleID)
+}
+
+func (s *Service) BindProjectAgentGroup(ctx context.Context, input BindProjectAgentGroupInput) (ProjectState, error) {
+	if _, err := s.store.BindProjectToAgentGroup(ctx, input.ProjectID, input.GroupID, input.LifecycleID); err != nil {
+		return ProjectState{}, err
+	}
+	return s.projectState(ctx, input.ProjectID)
+}
+
+func (s *Service) ensureDefaultAgentSouls(ctx context.Context) error {
+	groups, err := s.store.ListAgentGroups(ctx, false)
+	if err != nil {
+		return err
+	}
+	for _, group := range groups {
+		profiles, err := s.store.ListAgentProfiles(ctx, group.ID)
+		if err != nil {
+			return err
+		}
+		for _, profile := range profiles {
+			if _, err := s.ensureSoulFile(ctx, profile); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) ensureSoulFile(ctx context.Context, profile agentgroups.Profile) (string, error) {
+	group, err := s.store.GetAgentGroup(ctx, profile.GroupID)
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimSpace(profile.SoulPath)
+	if path == "" {
+		path = filepath.Join(s.paths.AgentsDir, safePathSegment(group.Slug), safePathSegment(profile.RoleKey), "soul.md")
+		profile.SoulPath = path
+		if _, err := s.store.SaveAgentProfile(ctx, profile); err != nil {
+			return "", err
+		}
+	}
+	if !isPathInside(path, s.paths.AgentsDir) {
+		return "", fmt.Errorf("soul_path должен лежать внутри %s", s.paths.AgentsDir)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		content := defaultSoulContent(group, profile)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (s *Service) agentSoulForStep(ctx context.Context, projectID string, spec agents.Spec) string {
+	binding, err := s.store.ProjectGroupBinding(ctx, projectID)
+	if err != nil {
+		return defaultSoulForSpec(spec)
+	}
+	profiles, err := s.store.ListAgentProfiles(ctx, binding.GroupID)
+	if err != nil {
+		return defaultSoulForSpec(spec)
+	}
+	for _, profile := range profiles {
+		if !profile.Enabled {
+			continue
+		}
+		if profile.RoleKey != spec.Role && profile.RoleKey != spec.ID {
+			continue
+		}
+		path, err := s.ensureSoulFile(ctx, profile)
+		if err != nil {
+			return defaultSoulForSpec(spec)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return defaultSoulForSpec(spec)
+		}
+		return strings.TrimSpace(string(content) + "\n\n" + agentCapabilityContract(profile))
+	}
+	return defaultSoulForSpec(spec)
+}
+
+func agentCapabilityContract(profile agentgroups.Profile) string {
+	profile = agentgroups.NormalizeCapabilities(profile)
+	var builder strings.Builder
+	builder.WriteString("# Capabilities Contract\n\n")
+	builder.WriteString("Этот контракт имеет приоритет над общим стилем из soul.md и описывает границы текущего агента.\n\n")
+	builder.WriteString("## Роль\n\n")
+	builder.WriteString("- ")
+	builder.WriteString(firstNonEmpty(profile.RoleKey, "agent"))
+	builder.WriteString("\n\n")
+	writeContractList(&builder, "## Что умею", profile.Capabilities)
+	writeContractList(&builder, "## Разрешенные инструменты", profile.AllowedTools)
+	builder.WriteString("## Доступ к файлам\n\n")
+	writeInlineContractList(&builder, "Читать", profile.ReadPaths)
+	writeInlineContractList(&builder, "Писать", profile.WritePaths)
+	builder.WriteString("\n")
+	writeContractList(&builder, "## Когда передаю дальше", profile.HandoffRules)
+	return strings.TrimSpace(builder.String())
+}
+
+func writeContractList(builder *strings.Builder, title string, values []string) {
+	builder.WriteString(title)
+	builder.WriteString("\n\n")
+	if len(values) == 0 {
+		builder.WriteString("- Не задано явно.\n\n")
+		return
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		builder.WriteString("- ")
+		builder.WriteString(value)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n")
+}
+
+func writeInlineContractList(builder *strings.Builder, title string, values []string) {
+	builder.WriteString(title)
+	builder.WriteString(":\n")
+	if len(values) == 0 {
+		builder.WriteString("- Не задано явно.\n")
+		return
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		builder.WriteString("- ")
+		builder.WriteString(value)
+		builder.WriteString("\n")
+	}
+}
+
+func defaultSoulContent(group agentgroups.Group, profile agentgroups.Profile) string {
+	return strings.TrimSpace(fmt.Sprintf(`# Soul
+
+## Кто я
+
+Я — %s, агент группы "%s" в Zavod AI.
+
+## За что отвечаю
+
+%s
+
+## Как принимаю решения
+
+- Сначала сверяюсь с задачей пользователя и текущей task spec.
+- Отделяю факты от предположений.
+- Если данных недостаточно, явно называю недостающий контекст.
+- Не подменяю требования своим удобством.
+
+## Как общаюсь с пользователем
+
+- Пишу по-русски.
+- Даю короткие, практичные ответы.
+- Не вывожу служебный JSON, trace и внутренние файлы без явной просьбы.
+
+## Что никогда не делаю
+
+- Не игнорирую safety guardrails приложения.
+- Не раскрываю секреты, токены и приватные данные.
+- Не выполняю произвольные команды вне разрешенного tool profile.
+- Не утверждаю, что выполнил действия, если в контексте нет результата.
+
+## Как передаю задачу дальше
+
+- Передаю следующему агенту только значимый контекст.
+- Сохраняю решения, ограничения и открытые вопросы.
+- Если вижу блокер, формулирую причину и нужный следующий шаг.
+`, profile.Name, group.Name, firstNonEmpty(profile.Description, "Выполняю свою роль в жизненном цикле группы."))) + "\n"
+}
+
+func defaultSoulForSpec(spec agents.Spec) string {
+	return strings.TrimSpace(fmt.Sprintf(`# Soul
+
+## Кто я
+
+Я — %s, агент Zavod AI.
+
+## За что отвечаю
+
+Работаю как роль "%s" и выполняю текущий шаг workflow.
+
+## Как общаюсь с пользователем
+
+Пишу по-русски, кратко и по делу. Не вывожу служебный JSON без необходимости.
+`, spec.Name, spec.Role))
+}
+
+func soulWarnings(content string) []string {
+	lower := strings.ToLower(content)
+	checks := []struct {
+		needle  string
+		warning string
+	}{
+		{"ignore safety", "Есть инструкция игнорировать safety."},
+		{"ignore previous instructions", "Есть инструкция игнорировать предыдущие инструкции."},
+		{"раскрой секрет", "Есть подозрительная инструкция про раскрытие секретов."},
+		{"выведи токен", "Есть подозрительная инструкция про токены."},
+		{"без scope", "Есть риск обхода scope для ИБ-задач."},
+		{"произвольн", "Есть риск разрешения произвольных действий."},
+	}
+	var warnings []string
+	for _, check := range checks {
+		if strings.Contains(lower, check.needle) {
+			warnings = append(warnings, check.warning)
+		}
+	}
+	return warnings
+}
+
+func safePathSegment(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "agent"
+	}
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r >= 'а' && r <= 'я' || r == 'ё' {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	clean := strings.Trim(builder.String(), "-")
+	if clean == "" {
+		return "agent"
+	}
+	return clean
+}
+
+func isPathInside(path string, root string) bool {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (s *Service) webSettings(ctx context.Context) webresearch.Settings {
 	raw, ok, err := s.store.GetSetting(ctx, webSettingsKey)
 	if err != nil || !ok || strings.TrimSpace(raw) == "" {
@@ -1788,65 +2986,179 @@ func (s *Service) runV03Workflow(
 	projectID := project.ID
 	result := v03WorkflowResult{}
 
-	intakeInput := buildManagerIntakeInput(history)
-	intake, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepManagerIntake, intakeInput)
-	if err != nil {
-		return result, err
-	}
-	result.Intake = intake
-	intakeResult, hasStructuredIntake := parseManagerIntake(intake)
-	if managerNeedsClarification(intake) {
-		result.NeedsClarification = true
-		if hasStructuredIntake {
-			result.Clarification = intake
-			_ = intakeResult
-		} else {
-			result.Clarification = intake
+	executed := map[string]bool{}
+	var runStep func(stepKey string) error
+	runStep = func(stepKey string) error {
+		if executed[stepKey] {
+			return nil
 		}
-		return result, nil
+		switch stepKey {
+		case zw.StepManagerIntake:
+			intake, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepManagerIntake, buildManagerIntakeInput(history))
+			if err != nil {
+				return err
+			}
+			result.Intake = intake
+			executed[stepKey] = true
+			intakeResult, hasStructuredIntake := parseManagerIntake(intake)
+			if hasStructuredIntake {
+				_ = s.updateTaskSpecFromIntake(ctx, project, taskID, run.ID, intakeResult)
+			}
+			if managerNeedsClarification(intake) {
+				result.NeedsClarification = true
+				if hasStructuredIntake {
+					result.Clarification = intake
+					_ = intakeResult
+				} else {
+					result.Clarification = intake
+				}
+			}
+		case zw.StepProductRequirements:
+			if err := runStep(zw.StepManagerIntake); err != nil || result.NeedsClarification {
+				return err
+			}
+			product, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepProductRequirements, buildProductInput(result.Intake))
+			if err != nil {
+				return err
+			}
+			result.Product = product
+			_ = s.updateTaskSpecFromProduct(ctx, project.ID, taskID, run.ID, product)
+			executed[stepKey] = true
+		case zw.StepTaskBlueprint:
+			if err := runStep(zw.StepProductRequirements); err != nil || result.NeedsClarification {
+				return err
+			}
+			blueprintOutput, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepTaskBlueprint, buildBlueprintInput(result.Intake, result.Product, projectCheckSignals(project.Path)))
+			if err != nil {
+				return err
+			}
+			parsedBlueprint, err := blueprint.Parse(blueprintOutput)
+			if err != nil {
+				return err
+			}
+			parsedBlueprint = blueprint.NormalizeForProject(parsedBlueprint, project.Path)
+			parsedBlueprint = devworkspace.NormalizeBlueprint(parsedBlueprint, project.Path)
+			parsedBlueprint.ProjectID = projectID
+			parsedBlueprint.TaskID = taskID
+			parsedBlueprint.WorkflowRunID = run.ID
+			savedBlueprint, err := s.store.CreateTaskBlueprint(ctx, parsedBlueprint)
+			if err != nil {
+				return err
+			}
+			result.Blueprint = savedBlueprint
+			_ = s.updateTaskSpecFromBlueprint(ctx, project.ID, taskID, run.ID, savedBlueprint)
+			_ = s.updateProjectMemoryFromBlueprint(ctx, project.ID, taskID, savedBlueprint)
+			executed[stepKey] = true
+		case zw.StepArchitectPlan:
+			if err := runStep(zw.StepTaskBlueprint); err != nil || result.NeedsClarification {
+				return err
+			}
+			architect, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepArchitectPlan, buildArchitectInput(result.Intake, result.Product, &result.Blueprint))
+			if err != nil {
+				return err
+			}
+			result.Architect = architect
+			_ = s.patchProjectMemory(ctx, projectmemory.Memory{
+				ProjectID:         project.ID,
+				Architecture:      shortenForPrompt(architect, 1800),
+				UpdatedFromTaskID: taskID,
+			})
+			executed[stepKey] = true
+		case zw.StepDeveloperPlan:
+			if err := runStep(zw.StepArchitectPlan); err != nil || result.NeedsClarification {
+				return err
+			}
+			developer, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepDeveloperPlan, buildDeveloperInput(result.Intake, result.Product, &result.Blueprint, result.Architect, projectSourceSnapshot(project.Path)))
+			if err != nil {
+				return err
+			}
+			result.Developer = developer
+			executed[stepKey] = true
+		default:
+			if isRuntimeOwnedStep(stepKey) {
+				return nil
+			}
+			if err := runStep(zw.StepManagerIntake); err != nil || result.NeedsClarification {
+				return err
+			}
+			_, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, stepKey, buildGenericLifecycleInput(result, project, stepKey))
+			if err != nil {
+				return err
+			}
+			executed[stepKey] = true
+		}
+		return nil
 	}
 
-	productInput := buildProductInput(intake)
-	product, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepProductRequirements, productInput)
-	if err != nil {
-		return result, err
+	for _, stepKey := range s.devLifecycleStepKeys(ctx, projectID) {
+		if err := runStep(stepKey); err != nil {
+			return result, err
+		}
+		if result.NeedsClarification {
+			return result, nil
+		}
 	}
-	result.Product = product
-
-	blueprintInput := buildBlueprintInput(intake, product, projectCheckSignals(project.Path))
-	blueprintOutput, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepTaskBlueprint, blueprintInput)
-	if err != nil {
-		return result, err
-	}
-	parsedBlueprint, err := blueprint.Parse(blueprintOutput)
-	if err != nil {
-		return result, err
-	}
-	parsedBlueprint = blueprint.NormalizeForProject(parsedBlueprint, project.Path)
-	parsedBlueprint.ProjectID = projectID
-	parsedBlueprint.TaskID = taskID
-	parsedBlueprint.WorkflowRunID = run.ID
-	savedBlueprint, err := s.store.CreateTaskBlueprint(ctx, parsedBlueprint)
-	if err != nil {
-		return result, err
-	}
-	result.Blueprint = savedBlueprint
-
-	architectInput := buildArchitectInput(intake, product, &savedBlueprint)
-	architect, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepArchitectPlan, architectInput)
-	if err != nil {
-		return result, err
-	}
-	result.Architect = architect
-
-	developerInput := buildDeveloperInput(intake, product, &savedBlueprint, architect, projectSourceSnapshot(project.Path))
-	developer, err := s.runWorkflowStep(ctx, projectID, taskID, run, provider, model, zw.StepDeveloperPlan, developerInput)
-	if err != nil {
-		return result, err
-	}
-	result.Developer = developer
 
 	return result, nil
+}
+
+func (s *Service) devLifecycleStepKeys(ctx context.Context, projectID string) []string {
+	keys := []string{}
+	if executor, ok := s.lifecycleExecutor(ctx, projectID); ok {
+		keys = append(keys, executor.StepKeys()...)
+	}
+	required := []string{
+		zw.StepManagerIntake,
+		zw.StepProductRequirements,
+		zw.StepTaskBlueprint,
+		zw.StepArchitectPlan,
+		zw.StepDeveloperPlan,
+	}
+	for _, key := range required {
+		if !containsString(keys, key) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func containsString(items []string, needle string) bool {
+	for _, item := range items {
+		if item == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func isRuntimeOwnedStep(stepKey string) bool {
+	switch stepKey {
+	case zw.StepUserPlan, zw.StepTesterCommands, zw.StepReview, zw.StepManagerFinal, zw.StepWebResearch, zw.StepSecurityAnalysis:
+		return true
+	default:
+		return false
+	}
+}
+
+func buildGenericLifecycleInput(result v03WorkflowResult, project project.Project, stepKey string) string {
+	return strings.TrimSpace(fmt.Sprintf(`
+Проект: %s
+Шаг lifecycle: %s
+
+Task brief:
+%s
+
+Требования:
+%s
+
+Task Blueprint:
+%s
+
+Архитектурный план:
+%s
+
+Выполни этот lifecycle-шаг кратко и практично. Не меняй файлы напрямую и не утверждай, что изменения уже применены.
+`, project.Name, stepKey, result.Intake, result.Product, blueprint.ToPrompt(&result.Blueprint), result.Architect))
 }
 
 func (s *Service) runWorkflowStep(
@@ -1859,7 +3171,20 @@ func (s *Service) runWorkflowStep(
 	stepKey string,
 	input string,
 ) (string, error) {
-	spec := agents.SpecForStep(stepKey)
+	return s.runWorkflowStepWithSpec(ctx, projectID, taskID, run, provider, model, stepKey, agents.SpecForStep(stepKey), input)
+}
+
+func (s *Service) runWorkflowStepWithSpec(
+	ctx context.Context,
+	projectID string,
+	taskID string,
+	run *zw.Run,
+	provider llm.Provider,
+	model llm.ModelConfig,
+	stepKey string,
+	spec agents.Spec,
+	input string,
+) (string, error) {
 	_ = s.store.StartWorkflowPlanStep(ctx, run.ID, stepKey, spec.ID)
 	run.CurrentStep = stepKey
 	run.Status = zw.StatusRunning
@@ -1881,7 +3206,8 @@ func (s *Service) runWorkflowStep(
 	stepCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	resp, err := provider.Generate(stepCtx, agents.RequestForSpec(model.ModelName, spec, input))
+	soul := s.agentSoulForStep(ctx, projectID, spec)
+	resp, err := provider.Generate(stepCtx, agents.RequestForSpecWithSoul(model.ModelName, spec, soul, input))
 	if err != nil {
 		failed, finishErr := s.store.FinishWorkflowStep(ctx, step.ID, zw.StepStatusFailed, "", err.Error())
 		if finishErr == nil {
@@ -1931,7 +3257,28 @@ func (s *Service) runWorkflowStep(
 func (s *Service) AgentStatuses() []agents.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	order := []string{agents.ManagerID, agents.ProductID, agents.ArchitectID, agents.DeveloperID, agents.TesterID, agents.ReviewerID}
+	order := []string{
+		agents.ManagerID,
+		agents.ProductID,
+		agents.ArchitectID,
+		agents.DeveloperID,
+		agents.TesterID,
+		agents.ReviewerID,
+		agents.SecurityID,
+		agents.ResearcherID,
+		agents.SourceReviewID,
+		agents.AnalystID,
+		agents.CTFScoutID,
+		agents.CTFWebID,
+		agents.CTFLFIID,
+		agents.CTFRCEID,
+		agents.CTFSQLiID,
+		agents.CTFPwnID,
+		agents.CTFCryptoID,
+		agents.CTFReverseID,
+		agents.CTFForensicsID,
+		agents.CTFValidatorID,
+	}
 	out := make([]agents.Status, 0, len(order))
 	for _, id := range order {
 		if status, ok := s.agentStatuses[id]; ok {
@@ -1957,11 +3304,25 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 	planSteps := []zw.PlanStep{}
 	artifactsList := []artifacts.Artifact{}
 	var taskBlueprint *blueprint.Blueprint
+	var liveTaskSpec *taskspec.Spec
+	var liveProjectMemory *projectmemory.Memory
 	var clarification *ClarificationDTO
 	proposedChanges := []changes.ProposedChange{}
 	testRuns := []checks.TestRun{}
 	reviewRuns := []reviews.ReviewRun{}
 	webSources := []webresearch.Source{}
+	var activeGroup *agentgroups.Group
+	var groupBinding *agentgroups.ProjectBinding
+	binding, err := s.store.ProjectGroupBinding(ctx, projectID)
+	if err != nil {
+		return ProjectState{}, err
+	}
+	groupBinding = &binding
+	group, err := s.store.GetAgentGroup(ctx, binding.GroupID)
+	if err != nil {
+		return ProjectState{}, err
+	}
+	activeGroup = &group
 	if task != nil {
 		messages, err = s.store.ListMessages(ctx, task.ID)
 		if err != nil {
@@ -2003,10 +3364,16 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 				return ProjectState{}, err
 			}
 		}
+		if savedSpec, specErr := s.store.LatestTaskSpecByTask(ctx, task.ID); specErr == nil {
+			liveTaskSpec = &savedSpec
+		}
 	}
 	artifactsList, err = s.store.ListArtifacts(ctx, projectID, 20)
 	if err != nil {
 		return ProjectState{}, err
+	}
+	if memory, memoryErr := s.ensureProjectMemory(ctx, item); memoryErr == nil && strings.TrimSpace(memory.ID) != "" {
+		liveProjectMemory = &memory
 	}
 	return ProjectState{
 		Project:       item,
@@ -2019,10 +3386,14 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 		Artifacts:     artifactsList,
 		Blueprint:     taskBlueprint,
 		Clarification: clarification,
+		TaskSpec:      liveTaskSpec,
+		ProjectMemory: liveProjectMemory,
 		Changes:       proposedChanges,
 		TestRuns:      testRuns,
 		Reviews:       reviewRuns,
 		WebSources:    webSources,
+		AgentGroup:    activeGroup,
+		GroupBinding:  groupBinding,
 	}, nil
 }
 
@@ -2153,7 +3524,7 @@ func testSuggestionMatchesKinds(suggestion checks.Suggestion, kinds map[string]b
 		return kinds["go"]
 	case "npm":
 		return kinds["npm"]
-	case "python", "python3":
+	case "python", "python3", ".venv/bin/python", ".venv/bin/python3":
 		return kinds["python"]
 	default:
 		return kinds["generic"]
@@ -2267,19 +3638,40 @@ func (s *Service) saveProposedChanges(ctx context.Context, project project.Proje
 
 func (s *Service) ensureBlueprintRequiredDrafts(ctx context.Context, project project.Project, runID string, drafts []changes.Draft) []changes.Draft {
 	taskBlueprint, err := s.store.LatestTaskBlueprint(ctx, runID)
-	if err != nil || taskBlueprint == nil || taskBlueprint.Stack != blueprint.StackPython {
+	if err != nil || taskBlueprint == nil {
 		return drafts
 	}
-	if hasDraftPath(drafts, "requirements.txt") || !blueprintExpectedPath(taskBlueprint.ExpectedFiles, "requirements.txt") {
-		return drafts
+	return devworkspace.EnsureDrafts(project.Path, *taskBlueprint, drafts)
+}
+
+func ensureGoModVersion(content string) string {
+	return devworkspace.EnsureGoModVersion(content)
+}
+
+func goVersionAtLeast125(value string) bool {
+	parts := strings.Split(strings.TrimSpace(value), ".")
+	if len(parts) < 2 {
+		return false
 	}
-	content := pythonRequirementsContent(taskBlueprint.Dependencies.Items)
-	return append(drafts, changes.Draft{
-		FilePath: "requirements.txt",
-		Action:   actionForProjectFile(project.Path, "requirements.txt"),
-		Content:  content,
-		Reason:   "Python dependencies for project virtualenv",
-	})
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	return major > 1 || major == 1 && minor >= 25
+}
+
+func draftIndexByPath(drafts []changes.Draft, path string) (int, bool) {
+	path = filepath.ToSlash(strings.Trim(path, "/"))
+	for index, draft := range drafts {
+		if filepath.ToSlash(strings.Trim(draft.FilePath, "/")) == path {
+			return index, true
+		}
+	}
+	return -1, false
 }
 
 func hasDraftPath(drafts []changes.Draft, path string) bool {
@@ -2303,24 +3695,7 @@ func blueprintExpectedPath(items []blueprint.ExpectedFile, path string) bool {
 }
 
 func pythonRequirementsContent(items []string) string {
-	var lines []string
-	seen := map[string]struct{}{}
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		if _, ok := seen[item]; ok {
-			continue
-		}
-		seen[item] = struct{}{}
-		lines = append(lines, item)
-	}
-	if len(lines) == 0 {
-		return "# standard library only\n"
-	}
-	sort.Strings(lines)
-	return strings.Join(lines, "\n") + "\n"
+	return devworkspace.PythonRequirementsContent(items)
 }
 
 func actionForProjectFile(projectPath string, relativePath string) string {
@@ -2676,6 +4051,206 @@ func buildSecurityAnalysisInput(userMessage string, project project.Project, his
 	return strings.TrimSpace(builder.String())
 }
 
+func buildCTFIntakeInput(userMessage string, project project.Project, history []chat.Message, workspace ctf.Workspace) string {
+	var builder strings.Builder
+	builder.WriteString("# CTF request\n")
+	builder.WriteString(userMessage)
+	builder.WriteString("\n\n# Workspace\n")
+	builder.WriteString(ctfWorkspacePrompt(project, workspace))
+	if len(history) > 0 {
+		builder.WriteString("\n\n# Recent chat\n")
+		for _, item := range recentMessages(history, 6) {
+			role := item.Role
+			if item.AgentID != "" {
+				role = item.AgentID
+			}
+			builder.WriteString("- ")
+			builder.WriteString(role)
+			builder.WriteString(": ")
+			builder.WriteString(shortenForPrompt(item.Content, 320))
+			builder.WriteString("\n")
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func buildCTFScopeInput(userMessage string, project project.Project, workspace ctf.Workspace, intake string) string {
+	return strings.TrimSpace(`
+# User request
+` + userMessage + `
+
+# Workspace
+` + ctfWorkspacePrompt(project, workspace) + `
+
+# Intake
+` + intake + `
+
+Проверь scope именно для этой CTF/lab задачи. Не проси разрешение для локальных файлов, docker/lab или явно CTF challenge. Для внешней цели без разрешения остановись и сформулируй, что пользователь должен подтвердить.
+`)
+}
+
+func buildCTFArtifactInput(userMessage string, project project.Project, workspace ctf.Workspace, intake string, scopeOutput string) string {
+	return strings.TrimSpace(`
+# User request
+` + userMessage + `
+
+# Workspace
+` + ctfWorkspacePrompt(project, workspace) + `
+
+# Intake
+` + intake + `
+
+# Scope
+` + scopeOutput + `
+
+Собери список известных артефактов из запроса и workspace. Не утверждай, что запускал команды или читал файлы, если результатов нет во входных данных.
+`)
+}
+
+func buildCTFTriageInput(userMessage string, project project.Project, workspace ctf.Workspace, artifactsOutput string) string {
+	return strings.TrimSpace(`
+# User request
+` + userMessage + `
+
+# Workspace
+` + ctfWorkspacePrompt(project, workspace) + `
+
+# Artifacts
+` + artifactsOutput + `
+
+Подтверди категорию и выбери краткую стратегию решения.
+`)
+}
+
+func buildCTFHypothesisInput(workspace ctf.Workspace, intake string, scopeOutput string, triageOutput string) string {
+	return strings.TrimSpace(`
+# Workspace
+` + ctfWorkspacePrompt(project.Project{}, workspace) + `
+
+# Intake
+` + intake + `
+
+# Scope
+` + scopeOutput + `
+
+# Triage
+` + triageOutput + `
+
+Собери гипотезы решения и приоритеты проверок.
+`)
+}
+
+func buildCTFSolverInput(userMessage string, project project.Project, workspace ctf.Workspace, intake string, scopeOutput string, artifactsOutput string, triageOutput string, hypothesisOutput string) string {
+	return strings.TrimSpace(`
+# User request
+` + userMessage + `
+
+# Workspace
+` + ctfWorkspacePrompt(project, workspace) + `
+
+# Intake
+` + intake + `
+
+# Scope
+` + scopeOutput + `
+
+# Artifacts
+` + artifactsOutput + `
+
+# Triage
+` + triageOutput + `
+
+# Hypotheses
+` + hypothesisOutput + `
+
+Решай как CTF/lab задачу категории workspace.category. Если нет данных для flag, дай воспроизводимый план и TODO вместо выдуманного результата.
+`)
+}
+
+func buildCTFValidationInput(workspace ctf.Workspace, solverOutput string) string {
+	return strings.TrimSpace(`
+# Workspace
+` + ctfWorkspacePrompt(project.Project{}, workspace) + `
+
+# Solver output
+` + solverOutput + `
+
+Проверь воспроизводимость, evidence, scope и writeup-readiness. Не выдумывай flag.
+`)
+}
+
+func buildCTFWriteupInput(workspace ctf.Workspace, intake string, scopeOutput string, artifactsOutput string, triageOutput string, hypothesisOutput string, solverOutput string, validationOutput string) string {
+	return strings.TrimSpace(`
+# Workspace
+` + ctfWorkspacePrompt(project.Project{}, workspace) + `
+
+# Intake
+` + intake + `
+
+# Scope
+` + scopeOutput + `
+
+# Artifacts
+` + artifactsOutput + `
+
+# Triage
+` + triageOutput + `
+
+# Hypotheses
+` + hypothesisOutput + `
+
+# Solver
+` + solverOutput + `
+
+# Validation
+` + validationOutput + `
+
+Собери writeup. Если flag неизвестен, оставь TODO.
+`)
+}
+
+func ctfWorkspacePrompt(project project.Project, workspace ctf.Workspace) string {
+	var builder strings.Builder
+	if project.Name != "" {
+		builder.WriteString(fmt.Sprintf("- project: %s\n", project.Name))
+	}
+	builder.WriteString(fmt.Sprintf("- title: %s\n", workspace.Title))
+	builder.WriteString(fmt.Sprintf("- category: %s\n", workspace.Category))
+	builder.WriteString(fmt.Sprintf("- scope_status: %s\n", workspace.ScopeStatus))
+	builder.WriteString(fmt.Sprintf("- requires_scope: %t\n", workspace.RequiresScope))
+	builder.WriteString(fmt.Sprintf("- root: %s\n", workspace.RelativeRoot))
+	builder.WriteString(fmt.Sprintf("- challenge: %s\n", workspace.ChallengeYAML))
+	builder.WriteString(fmt.Sprintf("- scope: %s\n", workspace.ScopeMD))
+	builder.WriteString(fmt.Sprintf("- notes: %s\n", workspace.NotesMD))
+	builder.WriteString(fmt.Sprintf("- solve_dir: %s\n", workspace.SolveDir))
+	builder.WriteString(fmt.Sprintf("- writeup: %s\n", workspace.WriteupMD))
+	if len(workspace.AllowedActions) > 0 {
+		builder.WriteString("- allowed_actions: ")
+		builder.WriteString(strings.Join(workspace.AllowedActions, ", "))
+		builder.WriteString("\n")
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func ctfScopeRequiredAnswer(workspace ctf.Workspace) string {
+	return strings.TrimSpace(fmt.Sprintf(
+		"## Нужен scope\n\nКатегория: `%s`\nWorkspace: `%s`\n\nПеред активными сетевыми действиями нужно явно подтвердить разрешение и границы цели в `%s`: target, authorization, allowed actions и ограничения по rate limit.",
+		workspace.Category,
+		workspace.RelativeRoot,
+		workspace.ScopeMD,
+	))
+}
+
+func ctfDoneAnswer(workspace ctf.Workspace, solverName string) string {
+	return strings.TrimSpace(fmt.Sprintf(
+		"## CTF workspace готов\n\nКатегория: `%s`\nSolver: %s\nWorkspace: `%s`\nWriteup: `%s`",
+		workspace.Category,
+		solverName,
+		workspace.RelativeRoot,
+		workspace.WriteupMD,
+	))
+}
+
 func buildWebResearchPlanInput(userMessage string, project project.Project, history []chat.Message) string {
 	var builder strings.Builder
 	builder.WriteString("Проект: ")
@@ -2715,18 +4290,112 @@ func buildWebResearchAnswerInput(userMessage string, project project.Project, pl
 	builder.WriteString(webresearch.FormatSourcesForPrompt(sources))
 	builder.WriteString("\n\nТребования к ответу:\n")
 	builder.WriteString("- Ответь по сути запроса.\n")
-	builder.WriteString("- Добавь ссылки в разделе источников.\n")
-	builder.WriteString("- Ссылки пиши строго как обычный Markdown: [название](https://example.com). Не вкладывай одну ссылку внутрь другой и не экранируй круглые скобки.\n")
+	builder.WriteString("- Не дублируй полный список источников: UI покажет источники отдельным блоком.\n")
+	builder.WriteString("- Если ссылка нужна в тексте рядом с важным утверждением, пиши ее строго как обычный Markdown: [название](https://example.com). Не вкладывай одну ссылку внутрь другой и не экранируй круглые скобки.\n")
+	builder.WriteString("- Не выводи сырой JSON, YAML или служебные dumps в чат.\n")
 	builder.WriteString("- Не придумывай факты, которых нет в источниках.\n")
 	return strings.TrimSpace(builder.String())
+}
+
+func buildResearchSourceReviewInput(userMessage string, project project.Project, plan webresearch.Plan, sources []webresearch.Source) string {
+	var builder strings.Builder
+	builder.WriteString("Проект: ")
+	builder.WriteString(project.Name)
+	builder.WriteString("\nЗапрос пользователя:\n")
+	builder.WriteString(userMessage)
+	builder.WriteString("\n\nПлан поиска:\n")
+	if planJSON, err := json.MarshalIndent(plan, "", "  "); err == nil {
+		builder.Write(planJSON)
+	}
+	builder.WriteString("\n\nИсточники для проверки:\n")
+	builder.WriteString(webresearch.FormatSourcesForPrompt(sources))
+	builder.WriteString("\n\nПроверь свежесть, trust level, прямые ссылки, противоречия и достаточность источников.")
+	return strings.TrimSpace(builder.String())
+}
+
+func buildResearchSynthesisInput(userMessage string, project project.Project, plan webresearch.Plan, sources []webresearch.Source, sourceReview string) string {
+	var builder strings.Builder
+	builder.WriteString(buildWebResearchAnswerInput(userMessage, project, plan, sources))
+	builder.WriteString("\n\nSource review:\n")
+	builder.WriteString(sourceReview)
+	builder.WriteString("\n\nСобери ответ для пользователя: коротко, по делу, с явным отделением фактов от выводов. Полный список источников не включай: он отображается отдельным UI-блоком.")
+	return strings.TrimSpace(builder.String())
+}
+
+func buildResearchNotesInput(userMessage string, project project.Project, plan webresearch.Plan, sources []webresearch.Source, sourceReview string, synthesis string) string {
+	var builder strings.Builder
+	builder.WriteString("Проект: ")
+	builder.WriteString(project.Name)
+	builder.WriteString("\nЗапрос пользователя:\n")
+	builder.WriteString(userMessage)
+	builder.WriteString("\n\nПлан поиска:\n")
+	if planJSON, err := json.MarshalIndent(plan, "", "  "); err == nil {
+		builder.Write(planJSON)
+	}
+	builder.WriteString("\n\nИсточники:\n")
+	builder.WriteString(webresearch.FormatSourcesForPrompt(sources))
+	builder.WriteString("\n\nSource review:\n")
+	builder.WriteString(sourceReview)
+	builder.WriteString("\n\nSynthesis:\n")
+	builder.WriteString(synthesis)
+	builder.WriteString("\n\nСохрани краткие research notes для будущих задач проекта.")
+	return strings.TrimSpace(builder.String())
+}
+
+func (s *Service) saveResearchNotes(ctx context.Context, currentProject project.Project, task chat.Task, workflowRunID string, notes string) (string, error) {
+	relativePath := filepath.Join("docs", "research-notes.md")
+	path := filepath.Join(currentProject.Path, relativePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	existing, _ := os.ReadFile(path)
+	var builder strings.Builder
+	builder.Write(existing)
+	if strings.TrimSpace(string(existing)) != "" {
+		builder.WriteString("\n\n---\n\n")
+	}
+	builder.WriteString(strings.TrimSpace(notes))
+	builder.WriteString("\n")
+	if err := os.WriteFile(path, []byte(builder.String()), 0o644); err != nil {
+		return "", err
+	}
+	_, err := s.store.CreateArtifact(ctx, artifacts.Artifact{
+		ProjectID:     currentProject.ID,
+		TaskID:        task.ID,
+		WorkflowRunID: workflowRunID,
+		AgentID:       agents.ResearcherID,
+		Kind:          "research_notes",
+		Title:         "Research notes",
+		Path:          path,
+		RelativePath:  relativePath,
+	})
+	if err != nil {
+		return "", err
+	}
+	return relativePath, nil
 }
 
 func webResearchFallbackAnswer(sources []webresearch.Source) string {
 	var builder strings.Builder
 	builder.WriteString("## Нашла источники\n\n")
-	builder.WriteString("Я собрала материалы, но модель не смогла надежно сформировать итоговый текст. Ниже список источников для ручной проверки.\n\n")
-	builder.WriteString(webResearchSourcesSection(sources))
+	builder.WriteString(fmt.Sprintf("Я собрала материалы, но модель не смогла надежно сформировать итоговый текст. Источники показаны отдельным блоком: %d.", len(sources)))
 	return strings.TrimSpace(builder.String())
+}
+
+func looksLikeRawJSONAnswer(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	trimmed = strings.TrimSpace(trimmed)
+	if trimmed == "" {
+		return false
+	}
+	if !(strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) {
+		return false
+	}
+	var parsed any
+	return json.Unmarshal([]byte(trimmed), &parsed) == nil
 }
 
 func webResearchSourcesSection(sources []webresearch.Source) string {
@@ -2921,7 +4590,7 @@ func (s *Service) buildDeveloperRepairInput(ctx context.Context, auto autopilotR
 
 	var builder strings.Builder
 	builder.WriteString("Это repair-итерация автопилота. Исправь только замечания ревью и/или упавшие проверки.\n")
-	builder.WriteString(fmt.Sprintf("Итерация: %d из %d.\n", auto.Iterations, maxAutoRepairIterations+1))
+	builder.WriteString(fmt.Sprintf("Итерация: %d из %d.\n", auto.Iterations, s.maxRepairIterationsForProject(ctx, project.ID)+1))
 	builder.WriteString("\nTask Blueprint:\n")
 	builder.WriteString(blueprint.ToPrompt(taskBlueprint))
 	builder.WriteString("\n\nКонтекст предыдущих шагов:\n")
@@ -3034,7 +4703,7 @@ func (s *Service) buildTesterInput(ctx context.Context, project project.Project,
 	if applied == 0 {
 		builder.WriteString("Примененных изменений нет.\n")
 	}
-	builder.WriteString("\nПредложи минимальные команды проверки только из allowlist, только если они подходят структуре проекта и только если они связаны с примененными изменениями текущего workflow. Не запускай Python-проверки, если в текущем workflow не менялись Python-файлы. Не запускай npm-проверки, если не менялись frontend/package файлы. Для Go-изменений предпочитай go test ./... и не добавляй проверки другого стека.")
+	builder.WriteString("\nПредложи минимальные команды проверки только из auto-раздела Code Execution Policy V0.8.4, только если они подходят структуре проекта и связаны с примененными изменениями текущего workflow. Не предлагай confirm/deny команды как автопроверки. Не запускай Python-проверки, если в текущем workflow не менялись Python-файлы. Не запускай npm-проверки, если не менялись frontend/package файлы. Для Go-изменений предпочитай go test ./... и не добавляй проверки другого стека. Для Python используй только .venv/bin/python: entrypoint, -m pytest или -m py_compile <file.py>.")
 	return builder.String()
 }
 
@@ -3196,6 +4865,7 @@ func (s *Service) buildReviewInput(ctx context.Context, project project.Project,
 	testRuns = s.refreshUnsupportedTestRuns(ctx, project, testRuns)
 	testRuns = latestTestRunsByCommand(testRuns)
 	taskBlueprint, _ := s.store.LatestTaskBlueprint(ctx, workflowRunID)
+	gateReport := s.reviewGateReport(ctx, project, workflowRunID)
 
 	var builder strings.Builder
 	builder.WriteString("Проект: ")
@@ -3203,6 +4873,9 @@ func (s *Service) buildReviewInput(ctx context.Context, project project.Project,
 	builder.WriteString("\nПуть проекта не используй как источник фактов, ревью делай только по данным ниже.\n")
 	builder.WriteString("\n# Task Blueprint\n")
 	builder.WriteString(blueprint.ToPrompt(taskBlueprint))
+	builder.WriteString("\n")
+	builder.WriteString("\n")
+	builder.WriteString(reviewgate.RenderPrompt(gateReport))
 	builder.WriteString("\n")
 
 	builder.WriteString("\n# Workflow context\n")
@@ -3276,6 +4949,24 @@ func (s *Service) buildReviewInput(ctx context.Context, project project.Project,
 
 	builder.WriteString("\nВерни итог ревью строго JSON.")
 	return builder.String()
+}
+
+func (s *Service) reviewGateReport(ctx context.Context, project project.Project, workflowRunID string) reviewgate.Report {
+	changesList, _ := s.store.ListProposedChanges(ctx, project.ID, workflowRunID, 100)
+	testRuns, _ := s.store.ListTestRuns(ctx, project.ID, workflowRunID, 100)
+	testRuns = s.refreshUnsupportedTestRuns(ctx, project, testRuns)
+	testRuns = latestTestRunsByCommand(testRuns)
+	taskBlueprint, _ := s.store.LatestTaskBlueprint(ctx, workflowRunID)
+	var taskSpec *taskspec.Spec
+	if spec, err := s.store.LatestTaskSpecByProject(ctx, project.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
+		taskSpec = &spec
+	}
+	return reviewgate.Build(reviewgate.Input{
+		TaskSpec:  taskSpec,
+		Blueprint: taskBlueprint,
+		Changes:   changesList,
+		Tests:     testRuns,
+	})
 }
 
 func recentMessages(messages []chat.Message, limit int) []chat.Message {
@@ -3588,6 +5279,11 @@ func (s *Service) buildDirectAnswerInput(ctx context.Context, project project.Pr
 	builder.WriteString("\n# Project\n")
 	builder.WriteString(fmt.Sprintf("- name: %s\n- path: %s\n", project.Name, project.Path))
 
+	if spec, err := s.store.LatestTaskSpecByTask(ctx, task.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
+		builder.WriteString("\n# Live Task Spec\n")
+		builder.WriteString(taskspec.RenderMarkdown(spec))
+	}
+
 	messages, _ := s.store.ListMessages(ctx, task.ID)
 	if len(messages) > 0 {
 		builder.WriteString("\n# Recent chat\n")
@@ -3754,6 +5450,488 @@ func (s *Service) latestArtifactContext(ctx context.Context, project project.Pro
 	return strings.TrimSpace(builder.String())
 }
 
+func (s *Service) resetTaskSpecForWorkflow(ctx context.Context, currentProject project.Project, task chat.Task, workflowRunID string, userRequest string) error {
+	_, err := s.store.UpsertTaskSpec(ctx, taskspec.Spec{
+		ProjectID:     currentProject.ID,
+		TaskID:        task.ID,
+		WorkflowRunID: workflowRunID,
+		UserRequest:   userRequest,
+		Summary:       titleFromContent(userRequest),
+		Goal:          userRequest,
+		Status:        taskspec.StatusActive,
+		Source:        "user_request",
+	})
+	return err
+}
+
+func (s *Service) updateTaskSpecFromIntake(ctx context.Context, currentProject project.Project, taskID string, workflowRunID string, intake managerIntakeResult) error {
+	status := taskspec.StatusActive
+	if intake.NeedsClarification {
+		status = taskspec.StatusWaitingClarification
+	}
+	return s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:     currentProject.ID,
+		TaskID:        taskID,
+		WorkflowRunID: workflowRunID,
+		Summary:       intake.Summary,
+		Goal:          intake.Goal,
+		Requirements:  intake.Constraints,
+		OpenQuestions: intake.OpenQuestions,
+		Status:        status,
+		Source:        "manager_intake",
+	}, true)
+}
+
+func (s *Service) updateTaskSpecFromProduct(ctx context.Context, projectID string, taskID string, workflowRunID string, productOutput string) error {
+	requirements := markdownItemsFromSections(productOutput, "функциональные требования", "требования", "requirements")
+	acceptance := markdownItemsFromSections(productOutput, "критерии готовности", "acceptance criteria", "definition of done")
+	return s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:          projectID,
+		TaskID:             taskID,
+		WorkflowRunID:      workflowRunID,
+		Requirements:       requirements,
+		AcceptanceCriteria: acceptance,
+		Status:             taskspec.StatusActive,
+		Source:             "product_requirements",
+	}, false)
+}
+
+func (s *Service) updateTaskSpecFromBlueprint(ctx context.Context, projectID string, taskID string, workflowRunID string, taskBlueprint blueprint.Blueprint) error {
+	return s.patchTaskSpec(ctx, taskspec.Spec{
+		ProjectID:          projectID,
+		TaskID:             taskID,
+		WorkflowRunID:      workflowRunID,
+		Requirements:       requirementsFromBlueprint(taskBlueprint),
+		AcceptanceCriteria: acceptanceFromBlueprint(taskBlueprint),
+		Decisions:          decisionsFromBlueprint(taskBlueprint),
+		OpenQuestions:      taskBlueprint.OpenQuestions,
+		Status:             taskspec.StatusActive,
+		Source:             "task_blueprint",
+	}, len(taskBlueprint.OpenQuestions) > 0)
+}
+
+func (s *Service) patchTaskSpec(ctx context.Context, patch taskspec.Spec, replaceOpenQuestions bool) error {
+	if strings.TrimSpace(patch.ProjectID) == "" || strings.TrimSpace(patch.TaskID) == "" {
+		return nil
+	}
+	current, err := s.store.LatestTaskSpecByTask(ctx, patch.TaskID)
+	if err != nil || strings.TrimSpace(current.ID) == "" {
+		current = taskspec.Spec{
+			ProjectID: patch.ProjectID,
+			TaskID:    patch.TaskID,
+			Status:    taskspec.StatusDraft,
+		}
+	}
+	if patch.WorkflowRunID != "" {
+		current.WorkflowRunID = patch.WorkflowRunID
+	}
+	if patch.UserRequest != "" {
+		current.UserRequest = patch.UserRequest
+	}
+	if patch.Summary != "" {
+		current.Summary = patch.Summary
+	}
+	if patch.Goal != "" {
+		current.Goal = patch.Goal
+	}
+	current.Requirements = taskspec.MergeStringLists(current.Requirements, patch.Requirements)
+	current.AcceptanceCriteria = taskspec.MergeStringLists(current.AcceptanceCriteria, patch.AcceptanceCriteria)
+	current.Decisions = taskspec.MergeStringLists(current.Decisions, patch.Decisions)
+	if replaceOpenQuestions {
+		current.OpenQuestions = taskspec.MergeStringLists(nil, patch.OpenQuestions)
+	} else {
+		current.OpenQuestions = taskspec.MergeStringLists(current.OpenQuestions, patch.OpenQuestions)
+	}
+	current.AcceptedAnswers = taskspec.MergeAnswers(current.AcceptedAnswers, patch.AcceptedAnswers)
+	if patch.Status != "" {
+		current.Status = patch.Status
+	}
+	if patch.Source != "" {
+		current.Source = patch.Source
+	}
+	_, err = s.store.UpsertTaskSpec(ctx, current)
+	return err
+}
+
+func (s *Service) ensureProjectMemory(ctx context.Context, currentProject project.Project) (projectmemory.Memory, error) {
+	current, err := s.store.ProjectMemory(ctx, currentProject.ID)
+	if err != nil {
+		return projectmemory.Memory{}, err
+	}
+	filesystemMemory := projectMemoryFromFilesystem(currentProject)
+	if strings.TrimSpace(current.ID) == "" {
+		return s.store.UpsertProjectMemory(ctx, filesystemMemory)
+	}
+	merged := projectmemory.Merge(current, filesystemMemory)
+	if projectMemoryEqual(current, merged) {
+		return current, nil
+	}
+	merged.ID = current.ID
+	merged.CreatedAt = current.CreatedAt
+	return s.store.UpsertProjectMemory(ctx, merged)
+}
+
+func (s *Service) patchProjectMemory(ctx context.Context, patch projectmemory.Memory) error {
+	if strings.TrimSpace(patch.ProjectID) == "" {
+		return nil
+	}
+	current, err := s.store.ProjectMemory(ctx, patch.ProjectID)
+	if err != nil {
+		return err
+	}
+	merged := projectmemory.Merge(current, patch)
+	if strings.TrimSpace(merged.ProjectID) == "" {
+		merged.ProjectID = patch.ProjectID
+	}
+	if current.ID != "" {
+		merged.ID = current.ID
+		merged.CreatedAt = current.CreatedAt
+	}
+	_, err = s.store.UpsertProjectMemory(ctx, merged)
+	return err
+}
+
+func (s *Service) updateProjectMemoryFromBlueprint(ctx context.Context, projectID string, taskID string, taskBlueprint blueprint.Blueprint) error {
+	memory := projectmemory.Memory{
+		ProjectID:         projectID,
+		Stack:             taskBlueprint.Stack,
+		Runtime:           taskBlueprint.Runtime,
+		ProjectType:       taskBlueprint.ProjectType,
+		UpdatedFromTaskID: taskID,
+	}
+	for _, command := range taskBlueprint.TestCommands {
+		if strings.TrimSpace(command.Command) != "" {
+			memory.TestCommands = append(memory.TestCommands, strings.TrimSpace(command.Command))
+		}
+	}
+	memory.Decisions = decisionsFromBlueprint(taskBlueprint)
+	if taskBlueprint.Dependencies.Policy != "" {
+		memory.Environment = append(memory.Environment, "Dependency policy: "+taskBlueprint.Dependencies.Policy)
+	}
+	for _, dep := range taskBlueprint.Dependencies.Items {
+		memory.Environment = append(memory.Environment, "Dependency: "+dep)
+	}
+	return s.patchProjectMemory(ctx, memory)
+}
+
+func (s *Service) updateProjectMemoryFromWorkflow(ctx context.Context, projectID string, taskID string, workflowRunID string, result v03WorkflowResult, auto autopilotResult) error {
+	memory := projectmemory.Memory{
+		ProjectID:         projectID,
+		UpdatedFromTaskID: taskID,
+	}
+	if result.Blueprint.Stack != "" || result.Blueprint.Runtime != "" || result.Blueprint.ProjectType != "" {
+		memory.Stack = result.Blueprint.Stack
+		memory.Runtime = result.Blueprint.Runtime
+		memory.ProjectType = result.Blueprint.ProjectType
+	}
+	memory.Decisions = append(memory.Decisions, decisionsFromBlueprint(result.Blueprint)...)
+	if spec, err := s.store.LatestTaskSpecByTask(ctx, taskID); err == nil && strings.TrimSpace(spec.ID) != "" {
+		memory.Decisions = append(memory.Decisions, spec.Decisions...)
+		for _, answer := range spec.AcceptedAnswers {
+			if answer.Question != "" && answer.Answer != "" {
+				memory.Decisions = append(memory.Decisions, answer.Question+": "+answer.Answer)
+			}
+		}
+	}
+	testRuns, _ := s.store.ListTestRuns(ctx, projectID, workflowRunID, 30)
+	for _, testRun := range latestTestRunsByCommand(testRuns) {
+		if strings.TrimSpace(testRun.Command) == "" {
+			continue
+		}
+		memory.TestCommands = append(memory.TestCommands, strings.TrimSpace(testRun.Command))
+		if testRun.Status == checks.StatusPassed {
+			memory.Environment = append(memory.Environment, "Проверка проходит: "+strings.TrimSpace(testRun.Command))
+		}
+	}
+	if auto.Blocked && auto.BlockReason != "" {
+		memory.Environment = append(memory.Environment, "Последний workflow был остановлен: "+auto.BlockReason)
+	}
+	return s.patchProjectMemory(ctx, memory)
+}
+
+func projectMemoryFromFilesystem(currentProject project.Project) projectmemory.Memory {
+	memory := projectmemory.Memory{ProjectID: currentProject.ID}
+	stacks := []string{}
+	addStack := func(value string) {
+		stacks = projectmemory.MergeStringLists(stacks, []string{value})
+	}
+	if content := readProjectFileSnippet(currentProject.Path, "go.mod", 64*1024); content != "" {
+		addStack("go")
+		if runtime := goRuntimeFromMod(content); runtime != "" {
+			memory.Runtime = runtime
+		}
+		if moduleName := goModuleName(content); moduleName != "" {
+			memory.Environment = append(memory.Environment, "Go module: "+moduleName)
+		}
+		memory.BuildCommands = append(memory.BuildCommands, "go build ./...")
+		memory.TestCommands = append(memory.TestCommands, "go test ./...")
+		memory.StyleGuide = append(memory.StyleGuide, "Go code must be formatted with gofmt.")
+	}
+	if fileExists(filepath.Join(currentProject.Path, "requirements.txt")) || len(rootFilesWithSuffix(currentProject.Path, ".py")) > 0 {
+		addStack("python")
+		if fileExists(filepath.Join(currentProject.Path, "requirements.txt")) {
+			memory.Environment = append(memory.Environment, "Python dependencies are declared in requirements.txt.")
+		}
+		if fileExists(filepath.Join(currentProject.Path, ".venv")) {
+			memory.Environment = append(memory.Environment, "Python virtualenv exists at .venv.")
+		} else {
+			memory.Environment = append(memory.Environment, "Python tasks should use .venv.")
+		}
+		memory.TestCommands = append(memory.TestCommands, "python -m pytest")
+	}
+	if content := readProjectFileSnippet(currentProject.Path, "package.json", 64*1024); content != "" {
+		addStack("node")
+		memory.BuildCommands = append(memory.BuildCommands, packageJSONCommands(content, "")...)
+	}
+	if content := readProjectFileSnippet(currentProject.Path, filepath.Join("frontend", "package.json"), 64*1024); content != "" {
+		addStack("frontend")
+		memory.BuildCommands = append(memory.BuildCommands, packageJSONCommands(content, "frontend")...)
+	}
+	if content := readProjectFileSnippet(currentProject.Path, "Makefile", 64*1024); content != "" {
+		memory.BuildCommands = append(memory.BuildCommands, makefileCommands(content, "build", "app", "dmg", "up", "run")...)
+		memory.TestCommands = append(memory.TestCommands, makefileCommands(content, "test", "check", "lint")...)
+		memory.Environment = append(memory.Environment, "Makefile is available for common project commands.")
+	}
+	if fileExists(filepath.Join(currentProject.Path, ".editorconfig")) {
+		memory.StyleGuide = append(memory.StyleGuide, "Follow .editorconfig.")
+	}
+	if fileExists(filepath.Join(currentProject.Path, "README.md")) {
+		memory.Environment = append(memory.Environment, "README.md contains project setup notes.")
+	}
+	if len(stacks) > 0 {
+		memory.Stack = strings.Join(stacks, ", ")
+	}
+	memory.BuildCommands = projectmemory.MergeStringLists(nil, memory.BuildCommands)
+	memory.TestCommands = projectmemory.MergeStringLists(nil, memory.TestCommands)
+	memory.StyleGuide = projectmemory.MergeStringLists(nil, memory.StyleGuide)
+	memory.Decisions = projectmemory.MergeStringLists(nil, memory.Decisions)
+	memory.Environment = projectmemory.MergeStringLists(nil, memory.Environment)
+	return memory
+}
+
+func goRuntimeFromMod(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 2 && fields[0] == "go" {
+			return "Go " + fields[1] + "+"
+		}
+	}
+	return ""
+}
+
+func goModuleName(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 2 && fields[0] == "module" {
+			return fields[1]
+		}
+	}
+	return ""
+}
+
+func packageJSONCommands(content string, prefix string) []string {
+	var decoded struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal([]byte(content), &decoded); err != nil {
+		return nil
+	}
+	commands := []string{}
+	for _, script := range []string{"build", "test", "lint", "dev"} {
+		if _, ok := decoded.Scripts[script]; !ok {
+			continue
+		}
+		command := "npm run " + script
+		if prefix != "" {
+			command += " --prefix " + prefix
+		}
+		commands = append(commands, command)
+	}
+	return commands
+}
+
+func makefileCommands(content string, targets ...string) []string {
+	available := map[string]bool{}
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "\t") || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" || strings.ContainsAny(name, " $/") {
+			continue
+		}
+		available[name] = true
+	}
+	commands := []string{}
+	for _, target := range targets {
+		if available[target] {
+			commands = append(commands, "make "+target)
+		}
+	}
+	return commands
+}
+
+func projectMemoryEqual(left projectmemory.Memory, right projectmemory.Memory) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return string(leftJSON) == string(rightJSON)
+}
+
+func taskSpecAnswersFromClarifications(answers []ClarificationAnswer) []taskspec.AcceptedAnswer {
+	out := make([]taskspec.AcceptedAnswer, 0, len(answers))
+	for _, item := range answers {
+		out = append(out, taskspec.AcceptedAnswer{
+			QuestionID: item.QuestionID,
+			Question:   item.Question,
+			Answer:     item.Answer,
+		})
+	}
+	return out
+}
+
+func taskSpecStatusFromWorkflow(status string) string {
+	switch status {
+	case zw.StatusDone:
+		return taskspec.StatusDone
+	case zw.StatusBlocked, zw.StatusFailed:
+		return taskspec.StatusBlocked
+	case zw.StatusWaitingUser:
+		return taskspec.StatusWaitingClarification
+	default:
+		return taskspec.StatusActive
+	}
+}
+
+func requirementsFromBlueprint(taskBlueprint blueprint.Blueprint) []string {
+	out := []string{}
+	for _, file := range taskBlueprint.ExpectedFiles {
+		if strings.TrimSpace(file.Path) == "" {
+			continue
+		}
+		text := fmt.Sprintf("Файл `%s` должен быть %s", file.Path, firstNonEmpty(file.Action, "обновлен"))
+		if file.Purpose != "" {
+			text += ": " + file.Purpose
+		}
+		out = append(out, text)
+	}
+	for _, dep := range taskBlueprint.Dependencies.Items {
+		out = append(out, "Зависимость: "+dep)
+	}
+	return out
+}
+
+func acceptanceFromBlueprint(taskBlueprint blueprint.Blueprint) []string {
+	out := []string{}
+	for _, command := range taskBlueprint.TestCommands {
+		if strings.TrimSpace(command.Command) == "" {
+			continue
+		}
+		text := "`" + strings.TrimSpace(command.Command) + "` проходит успешно"
+		if command.Reason != "" {
+			text += ": " + command.Reason
+		}
+		out = append(out, text)
+	}
+	if len(out) == 0 && len(taskBlueprint.ExpectedFiles) > 0 {
+		out = append(out, "Ожидаемые файлы из Task Blueprint созданы или обновлены.")
+	}
+	return out
+}
+
+func decisionsFromBlueprint(taskBlueprint blueprint.Blueprint) []string {
+	out := []string{}
+	if taskBlueprint.Stack != "" {
+		out = append(out, "Стек: "+taskBlueprint.Stack)
+	}
+	if taskBlueprint.Runtime != "" {
+		out = append(out, "Runtime: "+taskBlueprint.Runtime)
+	}
+	if taskBlueprint.ProjectType != "" {
+		out = append(out, "Тип проекта: "+taskBlueprint.ProjectType)
+	}
+	if taskBlueprint.ScaffoldRequired {
+		out = append(out, "Scaffold нужен.")
+	} else {
+		out = append(out, "Scaffold не нужен.")
+	}
+	for _, entrypoint := range taskBlueprint.Entrypoints {
+		out = append(out, "Entrypoint: "+entrypoint)
+	}
+	for _, forbidden := range taskBlueprint.ForbiddenFiles {
+		out = append(out, "Не менять: "+forbidden)
+	}
+	return out
+}
+
+func markdownItemsFromSections(content string, names ...string) []string {
+	section := markdownSection(content, names...)
+	if section == "" {
+		section = content
+	}
+	lines := strings.Split(section, "\n")
+	items := []string{}
+	for _, line := range lines {
+		item := strings.TrimSpace(line)
+		item = strings.TrimPrefix(item, "- ")
+		item = strings.TrimPrefix(item, "* ")
+		item = trimNumberedPrefix(item)
+		item = strings.TrimSpace(item)
+		if item == "" || strings.HasPrefix(item, "#") {
+			continue
+		}
+		if len([]rune(item)) > 220 {
+			item = shortenForPrompt(item, 220)
+		}
+		items = append(items, item)
+	}
+	return taskspec.MergeStringLists(nil, items)
+}
+
+func markdownSection(content string, names ...string) string {
+	lines := strings.Split(content, "\n")
+	start := -1
+	end := len(lines)
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+		if start == -1 {
+			for _, name := range names {
+				if strings.Contains(lower, strings.ToLower(strings.TrimSpace(name))) {
+					start = index + 1
+					break
+				}
+			}
+			continue
+		}
+		end = index
+		break
+	}
+	if start == -1 || start >= end {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(lines[start:end], "\n"))
+}
+
+func trimNumberedPrefix(value string) string {
+	for index, char := range value {
+		if char >= '0' && char <= '9' || char == '.' || char == ')' {
+			continue
+		}
+		if index == 0 {
+			return value
+		}
+		return strings.TrimSpace(value[index:])
+	}
+	return value
+}
+
 func wantsSavedTaskSpec(message string) bool {
 	text := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(message))), " ")
 	if !strings.Contains(text, "спек") {
@@ -3766,15 +5944,42 @@ func wantsSavedTaskSpec(message string) bool {
 		strings.Contains(text, "по которой")
 }
 
-func (s *Service) savedTaskSpecAnswer(ctx context.Context, project project.Project) string {
+func wantsProjectMemory(message string) bool {
+	text := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(message))), " ")
+	if !strings.Contains(text, "памят") && !strings.Contains(text, "memory") {
+		return false
+	}
+	return strings.Contains(text, "проект") ||
+		strings.Contains(text, "выведи") ||
+		strings.Contains(text, "покажи") ||
+		strings.Contains(text, "что помни")
+}
+
+func (s *Service) projectMemoryAnswer(ctx context.Context, currentProject project.Project) string {
+	memory, err := s.ensureProjectMemory(ctx, currentProject)
+	if err != nil || strings.TrimSpace(memory.ID) == "" {
+		return "## Память проекта не найдена\nЯ пока не нашла сохраненную память для этого проекта."
+	}
+	return "## Память проекта\n\n" + projectmemory.RenderMarkdown(memory)
+}
+
+func (s *Service) savedTaskSpecAnswer(ctx context.Context, project project.Project, task *chat.Task) string {
+	if task != nil {
+		if spec, err := s.store.LatestTaskSpecByTask(ctx, task.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
+			return "## Спека задачи\n\n" + taskspec.RenderMarkdown(spec)
+		}
+	}
+	if spec, err := s.store.LatestTaskSpecByProject(ctx, project.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
+		return "## Спека задачи\n\n" + taskspec.RenderMarkdown(spec)
+	}
 	content, relativePath := s.latestTaskSpecContent(ctx, project)
 	if strings.TrimSpace(content) == "" {
-		return "## Спека не найдена\nЯ не нашла сохраненную `docs/task-spec.md` для последнего запуска. Похоже, workflow еще не сохранял task spec для этого проекта."
+		return "## Спека не найдена\nЯ не нашла сохраненную живую спеку для последнего задания. Похоже, workflow еще не формировал Task Spec Store для этого проекта."
 	}
 	var builder strings.Builder
-	builder.WriteString("## Спека, по которой работал завод\n\n")
+	builder.WriteString("## Спека задачи\n\n")
 	if relativePath != "" {
-		builder.WriteString("Источник: `")
+		builder.WriteString("Источник fallback: `")
 		builder.WriteString(relativePath)
 		builder.WriteString("`\n\n")
 	}
@@ -3939,6 +6144,21 @@ func applyChangesMessage(applied int, failed int) string {
 	}
 	if applied == 0 && failed == 0 {
 		builder.WriteString("Нет ожидающих изменений.")
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func rollbackChangesMessage(rolledBack int, failed int) string {
+	var builder strings.Builder
+	builder.WriteString("## Rollback изменений\n")
+	if rolledBack > 0 {
+		builder.WriteString(fmt.Sprintf("Откатано файлов: %d.\n", rolledBack))
+	}
+	if failed > 0 {
+		builder.WriteString(fmt.Sprintf("Не откатилось файлов: %d. Подробности видны в блоке изменений.\n", failed))
+	}
+	if rolledBack == 0 && failed == 0 {
+		builder.WriteString("Нет примененных изменений для отката.")
 	}
 	return strings.TrimSpace(builder.String())
 }
@@ -4168,6 +6388,12 @@ func stepThinkingActivity(stepKey string) string {
 		return "Проводит ИБ-анализ"
 	case zw.StepWebResearch:
 		return "Планирует поиск в интернете"
+	case zw.StepResearchSourceReview:
+		return "Проверяет источники"
+	case zw.StepResearchSynthesis:
+		return "Сравнивает источники"
+	case zw.StepResearchNotes:
+		return "Сохраняет research notes"
 	case zw.StepDeveloperPlan:
 		return "Готовит план разработки"
 	case zw.StepTesterCommands:
@@ -4193,6 +6419,12 @@ func stepDoneActivity(stepKey string) string {
 		return "ИБ-анализ готов"
 	case zw.StepWebResearch:
 		return "Источники собраны"
+	case zw.StepResearchSourceReview:
+		return "Источники проверены"
+	case zw.StepResearchSynthesis:
+		return "Аналитика готова"
+	case zw.StepResearchNotes:
+		return "Research notes сохранены"
 	case zw.StepDeveloperPlan:
 		return "План разработки готов"
 	case zw.StepTesterCommands:

@@ -99,6 +99,13 @@ func (a *App) ApplyWorkflowChanges(input appsvc.ApplyWorkflowChangesInput) (apps
 	return a.service.ApplyWorkflowChanges(a.ctx, input)
 }
 
+func (a *App) RollbackWorkflowChanges(input appsvc.RollbackWorkflowChangesInput) (appsvc.ChatState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ChatState{}, err
+	}
+	return a.service.RollbackWorkflowChanges(a.ctx, input)
+}
+
 func (a *App) RunTestCommand(input appsvc.RunTestCommandInput) (appsvc.ChatState, error) {
 	if err := a.ready(); err != nil {
 		return appsvc.ChatState{}, err
@@ -139,6 +146,153 @@ func (a *App) SaveWebSettings(input appsvc.SaveWebSettingsInput) (appsvc.WebSett
 		return appsvc.WebSettingsDTO{}, err
 	}
 	return a.service.SaveWebSettings(a.ctx, input)
+}
+
+func (a *App) ListAgentGroups() ([]appsvc.AgentGroupDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ListAgentGroups(a.ctx)
+}
+
+func (a *App) CreateAgentGroup(input appsvc.CreateAgentGroupInput) ([]appsvc.AgentGroupDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.CreateAgentGroup(a.ctx, input)
+}
+
+func (a *App) ListAgentGroupTemplates() ([]appsvc.AgentGroupTemplateDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ListAgentGroupTemplates(a.ctx)
+}
+
+func (a *App) CreateAgentGroupFromTemplate(input appsvc.CreateAgentGroupFromTemplateInput) ([]appsvc.AgentGroupDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.CreateAgentGroupFromTemplate(a.ctx, input)
+}
+
+func (a *App) ListAgentLibrary() ([]appsvc.AgentLibraryItemDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ListAgentLibrary(a.ctx)
+}
+
+func (a *App) UpdateAgentGroup(input appsvc.UpdateAgentGroupInput) ([]appsvc.AgentGroupDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.UpdateAgentGroup(a.ctx, input)
+}
+
+func (a *App) ArchiveAgentGroup(input appsvc.ArchiveAgentGroupInput) ([]appsvc.AgentGroupDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ArchiveAgentGroup(a.ctx, input)
+}
+
+func (a *App) ListAgentProfiles(groupID string) ([]appsvc.AgentProfileDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ListAgentProfiles(a.ctx, groupID)
+}
+
+func (a *App) SaveAgentProfile(input appsvc.SaveAgentProfileInput) ([]appsvc.AgentProfileDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.SaveAgentProfile(a.ctx, input)
+}
+
+func (a *App) AddAgentFromLibrary(input appsvc.AddAgentFromLibraryInput) ([]appsvc.AgentProfileDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.AddAgentFromLibrary(a.ctx, input)
+}
+
+func (a *App) DuplicateAgentProfile(input appsvc.DuplicateAgentProfileInput) ([]appsvc.AgentProfileDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.DuplicateAgentProfile(a.ctx, input)
+}
+
+func (a *App) ReplaceAgentSoulFromLibrary(input appsvc.ReplaceAgentSoulFromLibraryInput) (appsvc.AgentSoulDTO, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.AgentSoulDTO{}, err
+	}
+	return a.service.ReplaceAgentSoulFromLibrary(a.ctx, input)
+}
+
+func (a *App) SetAgentProfileEnabled(input appsvc.SetAgentProfileEnabledInput) ([]appsvc.AgentProfileDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.SetAgentProfileEnabled(a.ctx, input)
+}
+
+func (a *App) GetAgentSoul(profileID string) (appsvc.AgentSoulDTO, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.AgentSoulDTO{}, err
+	}
+	return a.service.GetAgentSoul(a.ctx, profileID)
+}
+
+func (a *App) SaveAgentSoul(input appsvc.SaveAgentSoulInput) (appsvc.AgentSoulDTO, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.AgentSoulDTO{}, err
+	}
+	return a.service.SaveAgentSoul(a.ctx, input)
+}
+
+func (a *App) ListLifecycleDefinitions(groupID string) ([]appsvc.LifecycleDefinitionDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ListLifecycleDefinitions(a.ctx, groupID)
+}
+
+func (a *App) ListLifecycleSteps(lifecycleID string) ([]appsvc.LifecycleStepDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ListLifecycleSteps(a.ctx, lifecycleID)
+}
+
+func (a *App) SaveLifecycleDefinition(input appsvc.SaveLifecycleDefinitionInput) ([]appsvc.LifecycleDefinitionDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.SaveLifecycleDefinition(a.ctx, input)
+}
+
+func (a *App) SaveLifecycleStep(input appsvc.SaveLifecycleStepInput) ([]appsvc.LifecycleStepDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.SaveLifecycleStep(a.ctx, input)
+}
+
+func (a *App) DeleteLifecycleStep(input appsvc.DeleteLifecycleStepInput) ([]appsvc.LifecycleStepDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.DeleteLifecycleStep(a.ctx, input)
+}
+
+func (a *App) BindProjectAgentGroup(input appsvc.BindProjectAgentGroupInput) (appsvc.ProjectState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ProjectState{}, err
+	}
+	return a.service.BindProjectAgentGroup(a.ctx, input)
 }
 
 func (a *App) ready() error {

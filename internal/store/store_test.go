@@ -6,11 +6,408 @@ import (
 	"strings"
 	"testing"
 
+	"zavod_ai/internal/agentgroups"
 	"zavod_ai/internal/artifacts"
 	"zavod_ai/internal/changes"
 	"zavod_ai/internal/checks"
+	"zavod_ai/internal/projectmemory"
 	"zavod_ai/internal/reviews"
+	"zavod_ai/internal/taskspec"
 )
+
+func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "zavod.db")
+
+	s, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.EnsureDefaultModels(ctx); err != nil {
+		t.Fatalf("ensure default models: %v", err)
+	}
+	if err := s.EnsureDefaultAgentGroups(ctx, "qwen-remote"); err != nil {
+		t.Fatalf("ensure default agent groups: %v", err)
+	}
+
+	groups, err := s.ListAgentGroups(ctx, false)
+	if err != nil {
+		t.Fatalf("list agent groups: %v", err)
+	}
+	if len(groups) < 2 {
+		t.Fatalf("expected seeded groups, got %#v", groups)
+	}
+
+	var devGroup agentgroups.Group
+	var ctfGroup agentgroups.Group
+	var researchGroup agentgroups.Group
+	for _, group := range groups {
+		if group.ID == "group_dev_squad" {
+			devGroup = group
+		}
+		if group.ID == "group_ctf_cell" {
+			ctfGroup = group
+		}
+		if group.ID == "group_research_squad" {
+			researchGroup = group
+		}
+	}
+	if devGroup.ID == "" || devGroup.DefaultLifecycleID != "lifecycle_dev_default" || devGroup.AgentCount < 6 {
+		t.Fatalf("unexpected Dev Squad seed: %#v", devGroup)
+	}
+	if ctfGroup.ID == "" || ctfGroup.DefaultLifecycleID != "lifecycle_ctf_default" || ctfGroup.AgentCount < 11 {
+		t.Fatalf("unexpected CTF Cell seed: %#v", ctfGroup)
+	}
+	if researchGroup.ID == "" || researchGroup.DefaultLifecycleID != "lifecycle_research_default" || researchGroup.AgentCount < 4 {
+		t.Fatalf("unexpected Research Squad seed: %#v", researchGroup)
+	}
+
+	profiles, err := s.ListAgentProfiles(ctx, devGroup.ID)
+	if err != nil {
+		t.Fatalf("list dev profiles: %v", err)
+	}
+	if len(profiles) < 6 {
+		t.Fatalf("expected dev profiles, got %#v", profiles)
+	}
+	if len(profiles[0].Capabilities) == 0 || len(profiles[0].AllowedTools) == 0 || len(profiles[0].HandoffRules) == 0 {
+		t.Fatalf("expected seeded dev profile capabilities, got %#v", profiles[0])
+	}
+	ctfProfiles, err := s.ListAgentProfiles(ctx, ctfGroup.ID)
+	if err != nil {
+		t.Fatalf("list ctf profiles: %v", err)
+	}
+	ctfRoles := map[string]bool{}
+	for _, profile := range ctfProfiles {
+		ctfRoles[profile.RoleKey] = true
+	}
+	for _, role := range []string{"ctf_web", "ctf_lfi", "ctf_rce", "ctf_sqli", "ctf_pwn", "ctf_crypto", "ctf_reverse", "ctf_forensics"} {
+		if !ctfRoles[role] {
+			t.Fatalf("expected CTF role %s in seed, got %#v", role, ctfRoles)
+		}
+	}
+	for _, profile := range ctfProfiles {
+		if strings.HasPrefix(profile.RoleKey, "ctf_") && (len(profile.Capabilities) == 0 || len(profile.ReadPaths) == 0 || len(profile.WritePaths) == 0) {
+			t.Fatalf("expected CTF profile capability contract, got %#v", profile)
+		}
+	}
+	researchProfiles, err := s.ListAgentProfiles(ctx, researchGroup.ID)
+	if err != nil {
+		t.Fatalf("list research profiles: %v", err)
+	}
+	researchRoles := map[string]bool{}
+	for _, profile := range researchProfiles {
+		researchRoles[profile.RoleKey] = true
+	}
+	for _, role := range []string{"manager", "researcher", "source_reviewer", "analyst"} {
+		if !researchRoles[role] {
+			t.Fatalf("expected Research role %s in seed, got %#v", role, researchRoles)
+		}
+	}
+
+	steps, err := s.ListLifecycleSteps(ctx, devGroup.DefaultLifecycleID)
+	if err != nil {
+		t.Fatalf("list dev lifecycle steps: %v", err)
+	}
+	if len(steps) != 8 || steps[0].StepKey != "manager_intake" || steps[len(steps)-1].StepKey != "manager_final" {
+		t.Fatalf("unexpected dev lifecycle steps: %#v", steps)
+	}
+	researchSteps, err := s.ListLifecycleSteps(ctx, researchGroup.DefaultLifecycleID)
+	if err != nil {
+		t.Fatalf("list research lifecycle steps: %v", err)
+	}
+	if len(researchSteps) != 5 || researchSteps[0].StepKey != "web_research" || researchSteps[len(researchSteps)-1].StepKey != "manager_final" {
+		t.Fatalf("unexpected research lifecycle steps: %#v", researchSteps)
+	}
+
+	project, err := s.CreateProject(ctx, "Проект с группой", filepath.Join(t.TempDir(), "project"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	binding, err := s.ProjectGroupBinding(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("project group binding: %v", err)
+	}
+	if binding.GroupID != devGroup.ID || binding.LifecycleID != devGroup.DefaultLifecycleID {
+		t.Fatalf("expected project bound to Dev Squad, got %#v", binding)
+	}
+}
+
+func TestStorePersistsAgentProfileCapabilities(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "zavod.db")
+
+	s, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer s.Close()
+
+	group, err := s.CreateAgentGroup(ctx, agentgroups.Group{
+		Name:           "Custom Team",
+		Kind:           agentgroups.GroupKindCustom,
+		DefaultModelID: "qwen-remote",
+	})
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	saved, err := s.SaveAgentProfile(ctx, agentgroups.Profile{
+		GroupID:       group.ID,
+		Name:          "Специалист",
+		RoleKey:       "security",
+		Capabilities:  []string{"scope review", "scope review", "risk notes"},
+		AllowedTools:  []string{"web_search", "fetch_url"},
+		ReadPaths:     []string{"docs/**", "README*"},
+		WritePaths:    []string{"docs/**"},
+		HandoffRules:  []string{"Передать ревьюеру после анализа"},
+		ContextBudget: 9000,
+		Enabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+
+	got, err := s.GetAgentProfile(ctx, saved.ID)
+	if err != nil {
+		t.Fatalf("get profile: %v", err)
+	}
+	if len(got.Capabilities) != 2 || got.Capabilities[0] != "scope review" || got.Capabilities[1] != "risk notes" {
+		t.Fatalf("unexpected capabilities: %#v", got.Capabilities)
+	}
+	if strings.Join(got.AllowedTools, ",") != "web_search,fetch_url" {
+		t.Fatalf("unexpected tools: %#v", got.AllowedTools)
+	}
+	if strings.Join(got.ReadPaths, ",") != "docs/**,README*" || strings.Join(got.WritePaths, ",") != "docs/**" {
+		t.Fatalf("unexpected file access: read=%#v write=%#v", got.ReadPaths, got.WritePaths)
+	}
+	if len(got.HandoffRules) != 1 || !strings.Contains(got.HandoffRules[0], "ревьюеру") {
+		t.Fatalf("unexpected handoff rules: %#v", got.HandoffRules)
+	}
+}
+
+func TestStoreEditsLifecycleDefinitionAndSteps(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "zavod.db")
+
+	s, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.EnsureDefaultModels(ctx); err != nil {
+		t.Fatalf("ensure default models: %v", err)
+	}
+	if err := s.EnsureDefaultAgentGroups(ctx, "qwen-remote"); err != nil {
+		t.Fatalf("ensure default agent groups: %v", err)
+	}
+
+	updated, err := s.SaveLifecycleDefinition(ctx, agentgroups.LifecycleDefinition{
+		ID:                  "lifecycle_dev_default",
+		GroupID:             "group_dev_squad",
+		Name:                "Dev Autopilot tuned",
+		Kind:                agentgroups.GroupKindDev,
+		Description:         "custom limits",
+		MaxTotalIterations:  20,
+		MaxRepairIterations: 4,
+		SameErrorLimit:      3,
+		Status:              agentgroups.StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("save lifecycle definition: %v", err)
+	}
+	if updated.MaxRepairIterations != 4 || updated.SameErrorLimit != 3 {
+		t.Fatalf("unexpected lifecycle definition: %#v", updated)
+	}
+
+	step, err := s.SaveLifecycleStep(ctx, agentgroups.LifecycleStep{
+		LifecycleID:      updated.ID,
+		StepKey:          "docs_update",
+		Title:            "Документация",
+		AgentProfileID:   "agent_dev_docs",
+		Mode:             "llm",
+		Required:         false,
+		CanRetry:         true,
+		MaxRetries:       1,
+		OnFailureStepKey: "developer_plan",
+		VisibleToUser:    true,
+	})
+	if err != nil {
+		t.Fatalf("save lifecycle step: %v", err)
+	}
+	if step.ID == "" || step.StepKey != "docs_update" || !step.CanRetry {
+		t.Fatalf("unexpected lifecycle step: %#v", step)
+	}
+
+	steps, err := s.ListLifecycleSteps(ctx, updated.ID)
+	if err != nil {
+		t.Fatalf("list lifecycle steps: %v", err)
+	}
+	if len(steps) != 9 {
+		t.Fatalf("expected added step, got %#v", steps)
+	}
+
+	if err := s.DeleteLifecycleStep(ctx, step.ID); err != nil {
+		t.Fatalf("delete lifecycle step: %v", err)
+	}
+	steps, err = s.ListLifecycleSteps(ctx, updated.ID)
+	if err != nil {
+		t.Fatalf("list lifecycle steps after delete: %v", err)
+	}
+	if len(steps) != 8 {
+		t.Fatalf("expected deleted step, got %#v", steps)
+	}
+}
+
+func TestStoreUpsertsTaskSpec(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "zavod.db")
+
+	s, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer s.Close()
+
+	project, err := s.CreateProject(ctx, "Spec project", filepath.Join(t.TempDir(), "project"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	task, err := s.CreateTask(ctx, project.ID, "Сделать проверку сайта")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	saved, err := s.UpsertTaskSpec(ctx, taskspec.Spec{
+		ProjectID:          project.ID,
+		TaskID:             task.ID,
+		WorkflowRunID:      "run_1",
+		UserRequest:        "Сделать проверку сайта",
+		Goal:               "Проверять доступность сайта",
+		Requirements:       []string{"Принимать domain", "Принимать domain", "Принимать URL"},
+		AcceptanceCriteria: []string{"`go test ./...` проходит успешно"},
+		OpenQuestions:      []string{"Какая версия Go?"},
+		Status:             taskspec.StatusWaitingClarification,
+		Source:             "manager_intake",
+	})
+	if err != nil {
+		t.Fatalf("upsert spec: %v", err)
+	}
+	if saved.ID == "" || len(saved.Requirements) != 2 {
+		t.Fatalf("expected saved deduped spec, got %#v", saved)
+	}
+
+	updated, err := s.UpsertTaskSpec(ctx, taskspec.Spec{
+		ID:                 saved.ID,
+		ProjectID:          project.ID,
+		TaskID:             task.ID,
+		WorkflowRunID:      "run_2",
+		UserRequest:        saved.UserRequest,
+		Goal:               saved.Goal,
+		Requirements:       []string{"Принимать domain", "Принимать URL"},
+		AcceptanceCriteria: []string{"`go test ./...` проходит успешно"},
+		Decisions:          []string{"Runtime: Go 1.25+"},
+		OpenQuestions:      []string{},
+		AcceptedAnswers: []taskspec.AcceptedAnswer{{
+			QuestionID: "q1",
+			Question:   "Какая версия Go?",
+			Answer:     "Go 1.25+",
+		}},
+		Status: taskspec.StatusDone,
+		Source: "clarification_answers",
+	})
+	if err != nil {
+		t.Fatalf("update spec: %v", err)
+	}
+	if updated.ID != saved.ID || updated.WorkflowRunID != "run_2" || updated.Status != taskspec.StatusDone {
+		t.Fatalf("unexpected updated spec: %#v", updated)
+	}
+	if len(updated.AcceptedAnswers) != 1 || updated.AcceptedAnswers[0].Answer != "Go 1.25+" {
+		t.Fatalf("expected accepted answer, got %#v", updated.AcceptedAnswers)
+	}
+
+	byTask, err := s.LatestTaskSpecByTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("latest by task: %v", err)
+	}
+	byProject, err := s.LatestTaskSpecByProject(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("latest by project: %v", err)
+	}
+	if byTask.ID != saved.ID || byProject.ID != saved.ID {
+		t.Fatalf("expected latest spec by task/project, got task=%#v project=%#v", byTask, byProject)
+	}
+}
+
+func TestStoreUpsertsProjectMemory(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "zavod.db")
+
+	s, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer s.Close()
+
+	project, err := s.CreateProject(ctx, "Memory project", filepath.Join(t.TempDir(), "project"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	task, err := s.CreateTask(ctx, project.ID, "Сделать CLI")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	saved, err := s.UpsertProjectMemory(ctx, projectmemory.Memory{
+		ProjectID:         project.ID,
+		Stack:             "go",
+		Runtime:           "Go 1.25+",
+		BuildCommands:     []string{"make build", "make build"},
+		TestCommands:      []string{"go test ./..."},
+		StyleGuide:        []string{"gofmt"},
+		Decisions:         []string{"Использовать стандартную библиотеку"},
+		Environment:       []string{"Makefile available"},
+		UpdatedFromTaskID: task.ID,
+	})
+	if err != nil {
+		t.Fatalf("upsert project memory: %v", err)
+	}
+	if saved.ID == "" || len(saved.BuildCommands) != 1 {
+		t.Fatalf("expected saved deduped memory, got %#v", saved)
+	}
+
+	updated, err := s.UpsertProjectMemory(ctx, projectmemory.Memory{
+		ID:                saved.ID,
+		ProjectID:         project.ID,
+		Stack:             "go, python",
+		Runtime:           "Go 1.25+",
+		BuildCommands:     []string{"make build", "make dmg"},
+		TestCommands:      []string{"go test ./...", "python -m pytest"},
+		StyleGuide:        []string{"gofmt", "Follow .editorconfig"},
+		Decisions:         []string{"Использовать стандартную библиотеку", "Python tasks use .venv"},
+		Environment:       []string{"Makefile available", "requirements.txt declares deps"},
+		UpdatedFromTaskID: task.ID,
+	})
+	if err != nil {
+		t.Fatalf("update project memory: %v", err)
+	}
+	if updated.ID != saved.ID || updated.Stack != "go, python" {
+		t.Fatalf("unexpected updated memory: %#v", updated)
+	}
+	if len(updated.TestCommands) != 2 || updated.TestCommands[1] != "python -m pytest" {
+		t.Fatalf("expected merged test commands, got %#v", updated.TestCommands)
+	}
+
+	got, err := s.ProjectMemory(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("project memory: %v", err)
+	}
+	if got.ID != saved.ID || got.Runtime != "Go 1.25+" {
+		t.Fatalf("expected latest memory, got %#v", got)
+	}
+}
 
 func TestStorePersistsV01Entities(t *testing.T) {
 	ctx := context.Background()

@@ -8,6 +8,7 @@ import (
 type Paths struct {
 	CodeDir     string `json:"codeDir"`
 	ProjectsDir string `json:"projectsDir"`
+	AgentsDir   string `json:"agentsDir"`
 	DBPath      string `json:"dbPath"`
 }
 
@@ -21,12 +22,13 @@ func DefaultPaths() (Paths, error) {
 	return Paths{
 		CodeDir:     codeDir,
 		ProjectsDir: filepath.Join(home, "ai_zavod"),
+		AgentsDir:   filepath.Join(codeDir, "agents"),
 		DBPath:      filepath.Join(codeDir, "zavod.db"),
 	}, nil
 }
 
 func EnsureBaseDirs(paths Paths) error {
-	for _, dir := range []string{paths.CodeDir, paths.ProjectsDir, filepath.Dir(paths.DBPath)} {
+	for _, dir := range []string{paths.CodeDir, paths.ProjectsDir, paths.AgentsDir, filepath.Dir(paths.DBPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}

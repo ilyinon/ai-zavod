@@ -24,6 +24,7 @@ const (
 )
 
 type Finding struct {
+	Category   string `json:"category,omitempty"`
 	Severity   string `json:"severity"`
 	FilePath   string `json:"file_path"`
 	Message    string `json:"message"`
@@ -146,6 +147,7 @@ func stripCodeFence(value string) string {
 func normalizeFindings(items []Finding) []Finding {
 	out := make([]Finding, 0, len(items))
 	for _, item := range items {
+		item.Category = normalizeCategory(item.Category)
 		item.Severity = normalizeSeverity(item.Severity)
 		item.FilePath = strings.TrimSpace(item.FilePath)
 		item.Message = strings.TrimSpace(item.Message)
@@ -156,6 +158,15 @@ func normalizeFindings(items []Finding) []Finding {
 		out = append(out, item)
 	}
 	return out
+}
+
+func normalizeCategory(value string) string {
+	switch strings.TrimSpace(value) {
+	case "spec", "blueprint", "diff", "tests", "security", "quality":
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
 }
 
 func normalizeSeverity(value string) string {

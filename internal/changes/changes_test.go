@@ -169,6 +169,88 @@ func TestApplyCreateAndReplace(t *testing.T) {
 	}
 }
 
+func TestRollbackCreateAndReplace(t *testing.T) {
+	projectPath := t.TempDir()
+	createdPath := filepath.Join(projectPath, "tool.py")
+	createChange := ProposedChange{
+		ID:            "change_create",
+		FilePath:      "tool.py",
+		Action:        ActionCreate,
+		Content:       "print('new')\n",
+		Status:        StatusApplied,
+		BeforeContent: "",
+		AfterContent:  "print('new')\n",
+	}
+	if err := os.WriteFile(createdPath, []byte(createChange.AfterContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	createRollback, err := Rollback(projectPath, createChange)
+	if err != nil {
+		t.Fatalf("rollback create: %v", err)
+	}
+	if _, err := os.Stat(createdPath); !os.IsNotExist(err) {
+		t.Fatalf("expected created file to be removed, err=%v", err)
+	}
+	if !strings.Contains(createRollback.DiffText, "-print('new')") {
+		t.Fatalf("expected removal diff, got %s", createRollback.DiffText)
+	}
+
+	if err := os.WriteFile(createdPath, []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	replaceChange := ProposedChange{
+		ID:            "change_replace",
+		FilePath:      "tool.py",
+		Action:        ActionReplace,
+		Status:        StatusApplied,
+		BeforeContent: "before\n",
+		AfterContent:  "after\n",
+	}
+	if err := os.WriteFile(createdPath, []byte(replaceChange.AfterContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	replaceRollback, err := Rollback(projectPath, replaceChange)
+	if err != nil {
+		t.Fatalf("rollback replace: %v", err)
+	}
+	restored, err := os.ReadFile(createdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != replaceChange.BeforeContent {
+		t.Fatalf("expected restored content, got %q", restored)
+	}
+	if !strings.Contains(replaceRollback.DiffText, "-after") || !strings.Contains(replaceRollback.DiffText, "+before") {
+		t.Fatalf("expected rollback diff, got %s", replaceRollback.DiffText)
+	}
+}
+
+func TestRollbackRejectsChangedFile(t *testing.T) {
+	projectPath := t.TempDir()
+	path := filepath.Join(projectPath, "main.go")
+	change := ProposedChange{
+		ID:            "change_replace",
+		FilePath:      "main.go",
+		Action:        ActionReplace,
+		Status:        StatusApplied,
+		BeforeContent: "package main\n",
+		AfterContent:  "package main\n\nfunc main() {}\n",
+	}
+	if err := os.WriteFile(path, []byte("manual edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Rollback(projectPath, change); err == nil {
+		t.Fatal("expected rollback to reject file changed after apply")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "manual edit\n" {
+		t.Fatalf("manual edit should stay intact, got %q", content)
+	}
+}
+
 func TestGenerateUnifiedDiffKeepsContextLines(t *testing.T) {
 	diff := GenerateUnifiedDiff("app.txt", "one\ntwo\nthree\n", "one\nTWO\nthree\n")
 	for _, expected := range []string{"--- a/app.txt", "+++ b/app.txt", " one", "-two", "+TWO", " three"} {

@@ -100,16 +100,24 @@ func Parse(output string) (Blueprint, error) {
 }
 
 func NormalizeForProject(value Blueprint, projectPath string) Blueprint {
-	if value.Stack != StackPython {
+	switch value.Stack {
+	case StackGo:
+		value.Runtime = normalizeRuntime(value.Stack, value.Runtime)
+		value.ExpectedFiles = ensureGoModuleFile(value.ExpectedFiles, projectPath)
+		value.ForbiddenFiles = removePath(value.ForbiddenFiles, "go.mod")
+		value.TestCommands = ensureGoTestCommand(value.TestCommands)
+		value.RawJSON = toRawJSON(value)
+		return value
+	case StackPython:
+		value.Runtime = normalizeRuntime(value.Stack, value.Runtime)
+		value.ExpectedFiles = ensurePythonRequirementsFile(value.ExpectedFiles, projectPath)
+		value.ForbiddenFiles = removePath(value.ForbiddenFiles, "requirements.txt")
+		value.TestCommands = ensurePythonVenvTestCommands(value.TestCommands, value.Entrypoints)
+		value.RawJSON = toRawJSON(value)
+		return value
+	default:
 		return value
 	}
-
-	value.Runtime = normalizeRuntime(value.Stack, value.Runtime)
-	value.ExpectedFiles = ensurePythonRequirementsFile(value.ExpectedFiles, projectPath)
-	value.ForbiddenFiles = removePath(value.ForbiddenFiles, "requirements.txt")
-	value.TestCommands = ensurePythonVenvTestCommands(value.TestCommands, value.Entrypoints)
-	value.RawJSON = toRawJSON(value)
-	return value
 }
 
 func ToPrompt(value *Blueprint) string {
@@ -117,6 +125,11 @@ func ToPrompt(value *Blueprint) string {
 		return "Task blueprint еще не создан."
 	}
 	return value.RawJSON
+}
+
+func RefreshRawJSON(value Blueprint) Blueprint {
+	value.RawJSON = toRawJSON(value)
+	return value
 }
 
 func TestCommandsToSuggestions(value *Blueprint) []struct {
@@ -213,6 +226,37 @@ func ensurePythonRequirementsFile(items []ExpectedFile, projectPath string) []Ex
 		Path:    "requirements.txt",
 		Action:  pythonRequirementsAction(projectPath),
 		Purpose: "Python dependencies for project virtualenv",
+	})
+}
+
+func ensureGoModuleFile(items []ExpectedFile, projectPath string) []ExpectedFile {
+	if strings.TrimSpace(projectPath) != "" {
+		if _, err := os.Stat(filepath.Join(projectPath, "go.mod")); err == nil {
+			return items
+		}
+	}
+	for _, item := range items {
+		if filepath.ToSlash(strings.Trim(item.Path, "/")) == "go.mod" {
+			return items
+		}
+	}
+	return append([]ExpectedFile{{
+		Path:    "go.mod",
+		Action:  "create",
+		Purpose: "Go module scaffold with go 1.25",
+	}}, items...)
+}
+
+func ensureGoTestCommand(items []TestCommand) []TestCommand {
+	normalized := normalizeTestCommands(items)
+	for _, item := range normalized {
+		if strings.TrimSpace(item.Command) == "go test ./..." {
+			return normalized
+		}
+	}
+	return append(normalized, TestCommand{
+		Command: "go test ./...",
+		Reason:  "проверяет Go-проект",
 	})
 }
 
@@ -337,6 +381,12 @@ func normalizeTestCommands(items []TestCommand) []TestCommand {
 
 func normalizePythonCommand(command string) string {
 	args := strings.Fields(strings.TrimSpace(command))
+	if len(args) == 3 && isPythonExecutable(args[0]) && args[1] == "-m" && args[2] == "pytest" {
+		return ".venv/bin/python -m pytest"
+	}
+	if len(args) == 4 && isPythonExecutable(args[0]) && args[1] == "-m" && args[2] == "py_compile" && strings.HasSuffix(args[3], ".py") {
+		return ".venv/bin/python -m py_compile " + args[3]
+	}
 	if len(args) != 2 || !isPythonExecutable(args[0]) || !strings.HasSuffix(args[1], ".py") {
 		return command
 	}

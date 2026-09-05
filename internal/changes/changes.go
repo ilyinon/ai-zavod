@@ -14,9 +14,10 @@ const (
 	ActionCreate  = "create"
 	ActionReplace = "replace"
 
-	StatusPending = "pending"
-	StatusApplied = "applied"
-	StatusFailed  = "failed"
+	StatusPending    = "pending"
+	StatusApplied    = "applied"
+	StatusFailed     = "failed"
+	StatusRolledBack = "rolled_back"
 
 	MaxContentBytes = 200 * 1024
 )
@@ -50,6 +51,12 @@ type Draft struct {
 
 type ApplyResult struct {
 	BackupPath    string
+	BeforeContent string
+	AfterContent  string
+	DiffText      string
+}
+
+type RollbackResult struct {
 	BeforeContent string
 	AfterContent  string
 	DiffText      string
@@ -164,6 +171,49 @@ func Apply(projectPath string, change ProposedChange) (ApplyResult, error) {
 	default:
 		return ApplyResult{}, fmt.Errorf("неподдерживаемое действие: %s", change.Action)
 	}
+}
+
+func Rollback(projectPath string, change ProposedChange) (RollbackResult, error) {
+	relativePath, err := ValidateRelativePath(change.FilePath)
+	if err != nil {
+		return RollbackResult{}, err
+	}
+	if change.Status != StatusApplied {
+		return RollbackResult{}, fmt.Errorf("можно откатить только примененное изменение")
+	}
+	targetPath, err := safeJoin(projectPath, relativePath)
+	if err != nil {
+		return RollbackResult{}, err
+	}
+	current, err := os.ReadFile(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) && change.AfterContent == "" {
+			return RollbackResult{}, nil
+		}
+		return RollbackResult{}, err
+	}
+	currentContent := string(current)
+	if currentContent != change.AfterContent {
+		return RollbackResult{}, fmt.Errorf("файл изменился после применения; автоматический rollback остановлен: %s", relativePath)
+	}
+	if change.Action == ActionCreate && change.BeforeContent == "" {
+		if err := os.Remove(targetPath); err != nil {
+			return RollbackResult{}, err
+		}
+		return RollbackResult{
+			BeforeContent: currentContent,
+			AfterContent:  "",
+			DiffText:      GenerateUnifiedDiff(relativePath, currentContent, ""),
+		}, nil
+	}
+	if err := os.WriteFile(targetPath, []byte(change.BeforeContent), 0o644); err != nil {
+		return RollbackResult{}, err
+	}
+	return RollbackResult{
+		BeforeContent: currentContent,
+		AfterContent:  change.BeforeContent,
+		DiffText:      GenerateUnifiedDiff(relativePath, currentContent, change.BeforeContent),
+	}, nil
 }
 
 func GenerateUnifiedDiff(filePath string, before string, after string) string {

@@ -153,6 +153,11 @@ func hasPentestMarker(text string) bool {
 	return containsAny(text,
 		"пентест", "pentest", "penetration test", "уязвимост", "security audit",
 		"аудит безопасности", "threat model", "sql injection", "xss", "cve",
+		"ctf", "capture the flag", "challenge", "hackthebox", "tryhackme",
+		"picoctf", "ctftime", "root-me", "portswigger lab", "райтап", "writeup",
+		"lfi", "local file inclusion", "path traversal", "rce", "remote code execution",
+		"sqli", "pwn", "pwning", "crypto", "крипто", "reverse", "reversing",
+		"реверс", "forensics", "форензик",
 	)
 }
 

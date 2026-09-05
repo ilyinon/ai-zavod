@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"zavod_ai/internal/executionpolicy"
 )
 
 const (
@@ -102,11 +104,8 @@ func DefaultSuggestions(projectPath string) []Suggestion {
 			Reason:  "проверяет сборку frontend",
 		})
 	}
-	for _, script := range defaultPythonScripts(projectPath) {
-		suggestions = append(suggestions, Suggestion{
-			Command: ".venv/bin/python " + script,
-			Reason:  "запускает Python-скрипт проверки",
-		})
+	for _, suggestion := range defaultPythonSuggestions(projectPath) {
+		suggestions = append(suggestions, suggestion)
 	}
 	return suggestions
 }
@@ -194,17 +193,6 @@ func Run(ctx context.Context, projectPath string, command string, workingDir str
 }
 
 func resolveExecutableAlias(args []string) []string {
-	if len(args) == 0 || args[0] != "python" {
-		return args
-	}
-	if _, err := exec.LookPath("python"); err == nil {
-		return args
-	}
-	if _, err := exec.LookPath("python3"); err == nil {
-		out := append([]string{}, args...)
-		out[0] = "python3"
-		return out
-	}
 	return args
 }
 
@@ -271,8 +259,9 @@ func Resolve(projectPath string, command string, workingDir string) (string, []s
 	if len(args) == 0 {
 		return "", nil, fmt.Errorf("команда пустая")
 	}
-	if !isAllowedArgs(args) {
-		return "", nil, fmt.Errorf("команда не входит в allowlist проверок")
+	evaluation := executionpolicy.Evaluate(executionpolicy.ContextDev, strings.Join(args, " "))
+	if evaluation.Decision != executionpolicy.DecisionAuto {
+		return "", nil, fmt.Errorf("команда заблокирована policy: %s", evaluation.Reason)
 	}
 	if err := validateProjectSupport(workDir, args); err != nil {
 		return "", nil, err
@@ -324,37 +313,6 @@ func validateShellSafety(command string) error {
 	return nil
 }
 
-func isAllowedArgs(args []string) bool {
-	if len(args) < 2 {
-		return false
-	}
-	switch args[0] {
-	case "go":
-		if len(args) != 3 {
-			return false
-		}
-		if args[1] != "test" && args[1] != "vet" {
-			return false
-		}
-		return args[2] == "./..." || isSafeGoPackage(args[2])
-	case "npm":
-		if len(args) == 2 && args[1] == "test" {
-			return true
-		}
-		if len(args) == 3 && args[1] == "run" {
-			return args[2] == "test" || args[2] == "build" || args[2] == "lint"
-		}
-	default:
-		if isPythonExecutable(args[0]) {
-			if len(args) != 2 {
-				return false
-			}
-			return isSafePythonScript(args[1])
-		}
-	}
-	return false
-}
-
 func isPythonArgs(args []string) bool {
 	return len(args) >= 1 && isPythonExecutable(args[0])
 }
@@ -366,6 +324,31 @@ func isPythonExecutable(value string) bool {
 	default:
 		return false
 	}
+}
+
+func isVenvPythonExecutable(value string) bool {
+	switch strings.TrimSpace(filepath.ToSlash(value)) {
+	case ".venv/bin/python", ".venv/bin/python3":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAllowedPythonArgs(args []string) bool {
+	if len(args) < 2 || !isVenvPythonExecutable(args[0]) {
+		return false
+	}
+	if len(args) == 2 {
+		return isSafePythonScript(args[1])
+	}
+	if len(args) == 3 && args[1] == "-m" && args[2] == "pytest" {
+		return true
+	}
+	if len(args) == 4 && args[1] == "-m" && args[2] == "py_compile" {
+		return isSafePythonScript(args[3])
+	}
+	return false
 }
 
 func isSafeGoPackage(value string) bool {
@@ -405,13 +388,29 @@ func isSafePythonScript(value string) bool {
 
 func validateProjectSupport(workDir string, args []string) error {
 	if isPythonExecutable(args[0]) {
-		scriptPath := filepath.Join(workDir, args[1])
+		if !isVenvPythonExecutable(args[0]) {
+			return fmt.Errorf("Python-проверки должны запускаться только через .venv/bin/python")
+		}
+		if _, err := os.Stat(filepath.Join(workDir, "requirements.txt")); err != nil {
+			return fmt.Errorf("Python-проверка недоступна: в рабочем каталоге нет requirements.txt")
+		}
+		if len(args) == 3 && args[1] == "-m" && args[2] == "pytest" {
+			if hasPytestProject(workDir) {
+				return nil
+			}
+			return fmt.Errorf("pytest-проверка недоступна: не найден pytest-проект или tests")
+		}
+		scriptArg := args[1]
+		if len(args) == 4 && args[1] == "-m" && args[2] == "py_compile" {
+			scriptArg = args[3]
+		}
+		scriptPath := filepath.Join(workDir, scriptArg)
 		info, err := os.Stat(scriptPath)
 		if err != nil {
-			return fmt.Errorf("Python-скрипт не найден: %s", args[1])
+			return fmt.Errorf("Python-скрипт не найден: %s", scriptArg)
 		}
 		if info.IsDir() {
-			return fmt.Errorf("Python-скрипт должен быть файлом: %s", args[1])
+			return fmt.Errorf("Python-скрипт должен быть файлом: %s", scriptArg)
 		}
 		return nil
 	}
@@ -425,6 +424,43 @@ func validateProjectSupport(workDir string, args []string) error {
 		if _, err := os.Stat(filepath.Join(workDir, "package.json")); err != nil {
 			return fmt.Errorf("npm-проверка недоступна: в рабочем каталоге нет package.json")
 		}
+	}
+	return nil
+}
+
+func hasPytestProject(workDir string) bool {
+	for _, path := range []string{"pytest.ini", "pyproject.toml", "setup.cfg"} {
+		if _, err := os.Stat(filepath.Join(workDir, path)); err == nil {
+			return true
+		}
+	}
+	if info, err := os.Stat(filepath.Join(workDir, "tests")); err == nil && info.IsDir() {
+		return true
+	}
+	return false
+}
+
+func defaultPythonSuggestions(projectPath string) []Suggestion {
+	if _, err := os.Stat(filepath.Join(projectPath, "requirements.txt")); err != nil {
+		return nil
+	}
+	if hasPytestProject(projectPath) {
+		return []Suggestion{{
+			Command: ".venv/bin/python -m pytest",
+			Reason:  "запускает pytest внутри project virtualenv",
+		}}
+	}
+	for _, script := range defaultPythonScripts(projectPath) {
+		return []Suggestion{{
+			Command: ".venv/bin/python " + script,
+			Reason:  "запускает Python-скрипт проверки внутри project virtualenv",
+		}}
+	}
+	if script := firstPythonFile(projectPath); script != "" {
+		return []Suggestion{{
+			Command: ".venv/bin/python -m py_compile " + script,
+			Reason:  "проверяет синтаксис Python-файла внутри project virtualenv",
+		}}
 	}
 	return nil
 }
@@ -453,6 +489,36 @@ func defaultPythonScripts(projectPath string) []string {
 	return nil
 }
 
+func firstPythonFile(projectPath string) string {
+	var found string
+	_ = filepath.WalkDir(projectPath, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || found != "" {
+			return nil
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", ".zavod", ".venv", "__pycache__", "node_modules":
+				return filepath.SkipDir
+			default:
+				return nil
+			}
+		}
+		if !strings.HasSuffix(entry.Name(), ".py") {
+			return nil
+		}
+		rel, err := filepath.Rel(projectPath, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if isSafePythonScript(rel) {
+			found = rel
+		}
+		return nil
+	})
+	return found
+}
+
 func normalizeSuggestions(items []Suggestion) []Suggestion {
 	out := make([]Suggestion, 0, len(items))
 	seen := map[string]struct{}{}
@@ -476,6 +542,12 @@ func normalizeSuggestions(items []Suggestion) []Suggestion {
 
 func normalizePythonSuggestionCommand(command string) string {
 	args := strings.Fields(strings.TrimSpace(command))
+	if len(args) == 3 && isPythonExecutable(args[0]) && args[1] == "-m" && args[2] == "pytest" {
+		return ".venv/bin/python -m pytest"
+	}
+	if len(args) == 4 && isPythonExecutable(args[0]) && args[1] == "-m" && args[2] == "py_compile" && isSafePythonScript(args[3]) {
+		return ".venv/bin/python -m py_compile " + args[3]
+	}
 	if len(args) != 2 || !isPythonExecutable(args[0]) || !isSafePythonScript(args[1]) {
 		return command
 	}

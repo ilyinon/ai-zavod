@@ -1,14 +1,22 @@
 import { FormEvent, KeyboardEvent, MouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AgentGroup,
+  AgentGroupTemplate,
+  AgentLibraryItem,
+  AgentProfile,
+  AgentSoul,
   AgentStatus,
   AgentMessageDelta,
   AppPaths,
   ChatState,
+  LifecycleDefinition,
+  LifecycleStep,
   Message,
   ModelConfig,
   PendingClarification,
   ProposedChange,
   Project,
+  ProjectGroupBinding,
   ProjectState,
   TaskBlueprint,
   WebSource,
@@ -51,6 +59,17 @@ const workflowStepLabels: Record<string, string> = {
   architect_plan: 'Архитектурный план',
   security_analysis: 'ИБ-анализ',
   web_research: 'Поиск в сети',
+  source_review: 'Источники',
+  research_synthesis: 'Аналитика',
+  research_notes: 'Research notes',
+  intake: 'Постановка CTF',
+  scope_check: 'Scope',
+  artifact_collection: 'Артефакты',
+  triage: 'Категория',
+  hypothesis_board: 'Гипотезы',
+  category_solver: 'Решение',
+  validation: 'Проверка flag',
+  writeup: 'Writeup',
   developer_plan: 'Разработка',
   tester_commands: 'Проверка',
   review: 'Ревью',
@@ -69,7 +88,17 @@ const workflowStepOrder = [
 ];
 
 const securityWorkflowStepOrder = ['security_analysis'];
-const researchWorkflowStepOrder = ['web_research'];
+const researchWorkflowStepOrder = ['web_research', 'source_review', 'research_synthesis', 'research_notes', 'manager_final'];
+const ctfWorkflowStepOrder = [
+  'intake',
+  'scope_check',
+  'artifact_collection',
+  'triage',
+  'hypothesis_board',
+  'category_solver',
+  'validation',
+  'writeup',
+];
 
 const modelStatusLabels: Record<string, string> = {
   unknown: 'не проверялась',
@@ -88,12 +117,35 @@ const changeStatusLabels: Record<string, string> = {
   pending: 'ожидает',
   applied: 'применено',
   failed: 'ошибка',
+  rolled_back: 'откатано',
 };
 
 const changeActionLabels: Record<string, string> = {
   create: 'создать',
   replace: 'заменить',
 };
+
+function listToLines(items: string[] = []): string {
+  return items.join('\n');
+}
+
+function linesToList(value: string): string[] {
+  const seen = new Set<string>();
+  return value
+    .split('\n')
+    .map((item) => item.trim())
+    .filter((item) => {
+      if (!item) {
+        return false;
+      }
+      const key = item.toLowerCase();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
 
 const reviewStatusLabels: Record<string, string> = {
   pending: 'ожидает',
@@ -129,7 +181,9 @@ const defaultWebSettings: WebSettings = {
   blockedDomains: [],
 };
 
-type SettingsTab = 'projects' | 'models' | 'web';
+const lifecycleModes = ['llm', 'tool', 'checks', 'review', 'artifact', 'final', 'human_gate'];
+
+type SettingsTab = 'projects' | 'groups' | 'models' | 'web';
 
 function App() {
   const [paths, setPaths] = useState<AppPaths | null>(null);
@@ -146,14 +200,28 @@ function App() {
   const [changes, setChanges] = useState<ProposedChange[]>([]);
   const [webSources, setWebSources] = useState<WebSource[]>([]);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
+  const [agentGroups, setAgentGroups] = useState<AgentGroup[]>([]);
+  const [agentGroupTemplates, setAgentGroupTemplates] = useState<AgentGroupTemplate[]>([]);
+  const [agentLibrary, setAgentLibrary] = useState<AgentLibraryItem[]>([]);
+  const [currentAgentGroup, setCurrentAgentGroup] = useState<AgentGroup | null>(null);
+  const [groupBinding, setGroupBinding] = useState<ProjectGroupBinding | null>(null);
+  const [selectedGroupEditorId, setSelectedGroupEditorId] = useState('');
+  const [groupProfiles, setGroupProfiles] = useState<AgentProfile[]>([]);
+  const [groupLifecycles, setGroupLifecycles] = useState<LifecycleDefinition[]>([]);
+  const [lifecycleSteps, setLifecycleSteps] = useState<LifecycleStep[]>([]);
+  const [selectedLifecycleId, setSelectedLifecycleId] = useState('');
+  const [lifecycleForm, setLifecycleForm] = useState<LifecycleDefinition | null>(null);
+  const [lifecycleStepForm, setLifecycleStepForm] = useState<LifecycleStep | null>(null);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [activeModelId, setActiveModelId] = useState('');
   const [webSettings, setWebSettings] = useState<WebSettings>(defaultWebSettings);
   const [savingWebSettings, setSavingWebSettings] = useState(false);
   const [projectQuery, setProjectQuery] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectGroupId, setNewProjectGroupId] = useState('');
   const [existingProjectName, setExistingProjectName] = useState('');
   const [existingProjectPath, setExistingProjectPath] = useState('');
+  const [existingProjectGroupId, setExistingProjectGroupId] = useState('');
   const [editingProjectId, setEditingProjectId] = useState('');
   const [editingProjectName, setEditingProjectName] = useState('');
   const [editingProjectPath, setEditingProjectPath] = useState('');
@@ -162,6 +230,22 @@ function App() {
   const [showExistingProject, setShowExistingProject] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('projects');
+  const [groupForm, setGroupForm] = useState({
+    id: '',
+    name: '',
+    kind: 'custom',
+    description: '',
+    defaultModelId: '',
+  });
+  const [agentForm, setAgentForm] = useState<AgentProfile | null>(null);
+  const [soulEditor, setSoulEditor] = useState<AgentSoul | null>(null);
+  const [savingSoul, setSavingSoul] = useState(false);
+  const [savingGroup, setSavingGroup] = useState(false);
+  const [savingAgent, setSavingAgent] = useState(false);
+  const [libraryTargetProfileId, setLibraryTargetProfileId] = useState('');
+  const [addingLibraryAgentId, setAddingLibraryAgentId] = useState('');
+  const [savingLifecycle, setSavingLifecycle] = useState(false);
+  const [savingLifecycleStep, setSavingLifecycleStep] = useState(false);
   const [messageInput, setMessageInput] = useState('');
   const [modelForm, setModelForm] = useState<ModelConfig>(emptyModel);
   const [editingModelId, setEditingModelId] = useState('');
@@ -169,7 +253,9 @@ function App() {
   const [streamingMessage, setStreamingMessage] = useState<Message | null>(null);
   const [expandedDiffIds, setExpandedDiffIds] = useState<string[]>([]);
   const [changesDockOpen, setChangesDockOpen] = useState(false);
+  const [sourcesDockOpen, setSourcesDockOpen] = useState(false);
   const [applyingChanges, setApplyingChanges] = useState(false);
+  const [rollingBackChanges, setRollingBackChanges] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState('');
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   const [submittingClarification, setSubmittingClarification] = useState(false);
@@ -239,6 +325,33 @@ function App() {
     }
   }, [models, activeModelId, editingModelId]);
 
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== 'groups') {
+      return;
+    }
+    const nextGroupId = selectedGroupEditorId || currentAgentGroup?.id || agentGroups[0]?.id || '';
+    if (!nextGroupId) {
+      return;
+    }
+    if (nextGroupId !== selectedGroupEditorId) {
+      setSelectedGroupEditorId(nextGroupId);
+    }
+    void loadGroupDetails(nextGroupId);
+  }, [settingsOpen, settingsTab, selectedGroupEditorId, currentAgentGroup?.id, agentGroups]);
+
+  useEffect(() => {
+    const fallbackGroupId = defaultProjectGroupId(agentGroups);
+    if (!fallbackGroupId) {
+      return;
+    }
+    if (!newProjectGroupId) {
+      setNewProjectGroupId(fallbackGroupId);
+    }
+    if (!existingProjectGroupId) {
+      setExistingProjectGroupId(fallbackGroupId);
+    }
+  }, [agentGroups, newProjectGroupId, existingProjectGroupId]);
+
   const activeModel = useMemo(
     () => models.find((model) => model.id === activeModelId) ?? models.find((model) => model.isActive) ?? null,
     [models, activeModelId],
@@ -259,6 +372,7 @@ function App() {
     return source.filter((message) => !isRoutinePipelineMessage(message));
   }, [messages, streamingMessage]);
   const visibleChanges = useMemo(() => aggregateWorkflowChanges(changes), [changes]);
+  const visibleWebSources = useMemo(() => compactWebSources(webSources), [webSources]);
   const pendingChanges = useMemo(() => changes.filter((change) => change.status === 'pending'), [changes]);
   const changeSummary = useMemo(() => summarizeChanges(visibleChanges), [visibleChanges]);
 
@@ -277,6 +391,9 @@ function App() {
       setSelectedProjectId(state.selectedProjectId);
       applyProjectState(state.chat);
       setAgents(state.agents);
+      setAgentGroups(state.agentGroups ?? []);
+      setAgentGroupTemplates(state.agentGroupTemplates ?? []);
+      setAgentLibrary(state.agentLibrary ?? []);
       setModels(state.models);
       setActiveModelId(state.activeModelId);
       setWebSettings(state.webSettings ?? defaultWebSettings);
@@ -301,6 +418,8 @@ function App() {
     setClarification(state.clarification ?? null);
     setChanges(state.changes ?? []);
     setWebSources(state.webSources ?? []);
+    setCurrentAgentGroup(state.agentGroup ?? null);
+    setGroupBinding(state.groupBinding ?? null);
   }
 
   function applyChatState(state: ChatState) {
@@ -351,8 +470,9 @@ function App() {
     event.preventDefault();
     setError('');
     try {
-      await backend.createProject(newProjectName);
+      await backend.createProject(newProjectName, newProjectGroupId, lifecycleForGroup(agentGroups, newProjectGroupId));
       setNewProjectName('');
+      setNewProjectGroupId(defaultProjectGroupId(agentGroups));
       setShowNewProject(false);
       setSettingsOpen(false);
       await loadBootstrap();
@@ -365,9 +485,15 @@ function App() {
     event.preventDefault();
     setError('');
     try {
-      await backend.addExistingProject(existingProjectName, existingProjectPath);
+      await backend.addExistingProject(
+        existingProjectName,
+        existingProjectPath,
+        existingProjectGroupId,
+        lifecycleForGroup(agentGroups, existingProjectGroupId),
+      );
       setExistingProjectName('');
       setExistingProjectPath('');
+      setExistingProjectGroupId(defaultProjectGroupId(agentGroups));
       setShowExistingProject(false);
       setSettingsOpen(false);
       await loadBootstrap();
@@ -600,6 +726,373 @@ function App() {
     }
   }
 
+  async function loadGroupDetails(groupId: string, groupsSource = agentGroups) {
+    if (!groupId) {
+      setGroupProfiles([]);
+      setGroupLifecycles([]);
+      setLifecycleSteps([]);
+      setSelectedLifecycleId('');
+      setLifecycleForm(null);
+      setLifecycleStepForm(null);
+      return;
+    }
+    setError('');
+    try {
+      const [profiles, lifecycles] = await Promise.all([
+        backend.listAgentProfiles(groupId),
+        backend.listLifecycleDefinitions(groupId),
+      ]);
+      setGroupProfiles(profiles);
+      setLibraryTargetProfileId(profiles[0]?.id ?? '');
+      setGroupLifecycles(lifecycles);
+      const selectedGroup = groupsSource.find((group) => group.id === groupId);
+      setGroupForm({
+        id: selectedGroup?.id ?? '',
+        name: selectedGroup?.name ?? '',
+        kind: selectedGroup?.kind ?? 'custom',
+        description: selectedGroup?.description ?? '',
+        defaultModelId: selectedGroup?.defaultModelId || activeModelId,
+      });
+      const lifecycleID = selectedGroup?.defaultLifecycleId || lifecycles[0]?.id || '';
+      if (lifecycleID) {
+        setSelectedLifecycleId(lifecycleID);
+        setLifecycleForm(lifecycles.find((item) => item.id === lifecycleID) ?? lifecycles[0] ?? null);
+        setLifecycleSteps(await backend.listLifecycleSteps(lifecycleID));
+      } else {
+        setSelectedLifecycleId('');
+        setLifecycleForm(null);
+        setLifecycleSteps([]);
+      }
+      setAgentForm(null);
+      setSoulEditor(null);
+      setLibraryTargetProfileId('');
+      setLifecycleStepForm(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  function handleNewGroup() {
+    setSelectedGroupEditorId('');
+    setGroupProfiles([]);
+    setLibraryTargetProfileId('');
+    setGroupLifecycles([]);
+    setLifecycleSteps([]);
+    setSelectedLifecycleId('');
+    setLifecycleForm(null);
+    setLifecycleStepForm(null);
+    setGroupForm({
+      id: '',
+      name: '',
+      kind: 'custom',
+      description: '',
+      defaultModelId: activeModelId,
+    });
+    setAgentForm(null);
+    setSoulEditor(null);
+  }
+
+  async function handleSaveGroup(event: FormEvent) {
+    event.preventDefault();
+    setSavingGroup(true);
+    setError('');
+    try {
+      const updated = groupForm.id
+        ? await backend.updateAgentGroup(groupForm)
+        : await backend.createAgentGroup({
+            name: groupForm.name,
+            kind: groupForm.kind,
+            description: groupForm.description,
+            defaultModelId: groupForm.defaultModelId || activeModelId,
+          });
+      setAgentGroups(updated);
+      const saved =
+        updated.find((group) => group.id === groupForm.id) ??
+        updated.find((group) => group.name === groupForm.name) ??
+        updated[0];
+      if (saved) {
+        setSelectedGroupEditorId(saved.id);
+        await loadGroupDetails(saved.id, updated);
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingGroup(false);
+    }
+  }
+
+  async function handleCreateGroupFromTemplate(templateId: string) {
+    setSavingGroup(true);
+    setError('');
+    try {
+      const before = new Set(agentGroups.map((group) => group.id));
+      const updated = await backend.createAgentGroupFromTemplate({
+        templateId,
+        defaultModelId: activeModelId,
+      });
+      setAgentGroups(updated);
+      const created = updated.find((group) => !before.has(group.id)) ?? updated[0];
+      if (created) {
+        setSelectedGroupEditorId(created.id);
+        await loadGroupDetails(created.id, updated);
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingGroup(false);
+    }
+  }
+
+  async function handleArchiveGroup(groupId: string) {
+    setError('');
+    try {
+      const updated = await backend.archiveAgentGroup(groupId);
+      setAgentGroups(updated);
+      const nextGroupId = updated[0]?.id || '';
+      setSelectedGroupEditorId(nextGroupId);
+      await loadGroupDetails(nextGroupId, updated);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function handleBindProjectGroup(groupId: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+    const group = agentGroups.find((item) => item.id === groupId);
+    setError('');
+    try {
+      const state = await backend.bindProjectAgentGroup(selectedProjectId, groupId, group?.defaultLifecycleId ?? '');
+      applyProjectState(state);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  function handleNewAgent() {
+    setAgentForm({
+      id: '',
+      groupId: selectedGroupEditorId,
+      name: '',
+      roleKey: 'custom',
+      description: '',
+      avatarPath: '',
+      soulPath: '',
+      modelId: groupForm.defaultModelId || activeModelId,
+      toolProfileId: '',
+      capabilities: [],
+      allowedTools: [],
+      readPaths: [],
+      writePaths: [],
+      handoffRules: [],
+      temperature: 0.1,
+      contextBudget: 8000,
+      enabled: true,
+      sortOrder: groupProfiles.length,
+      createdAt: '',
+      updatedAt: '',
+    });
+  }
+
+  async function handleSaveAgent(event: FormEvent) {
+    event.preventDefault();
+    if (!agentForm) {
+      return;
+    }
+    setSavingAgent(true);
+    setError('');
+    try {
+      const updated = await backend.saveAgentProfile(agentForm);
+      setGroupProfiles(updated);
+      setLibraryTargetProfileId((previous) => previous || updated[0]?.id || '');
+      setAgentForm(null);
+      const groups = await backend.listAgentGroups();
+      setAgentGroups(groups);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingAgent(false);
+    }
+  }
+
+  async function handleToggleAgent(profile: AgentProfile) {
+    setError('');
+    try {
+      const updated = await backend.setAgentProfileEnabled(profile.id, !profile.enabled);
+      setGroupProfiles(updated);
+      setLibraryTargetProfileId((previous) => previous || updated[0]?.id || '');
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function handleDuplicateAgent(profile: AgentProfile) {
+    setError('');
+    try {
+      const updated = await backend.duplicateAgentProfile(profile.id);
+      setGroupProfiles(updated);
+      setLibraryTargetProfileId(updated[updated.length - 1]?.id || updated[0]?.id || '');
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function handleAddLibraryAgent(libraryAgentId: string) {
+    if (!selectedGroupEditorId) {
+      return;
+    }
+    setAddingLibraryAgentId(libraryAgentId);
+    setError('');
+    try {
+      const updated = await backend.addAgentFromLibrary(selectedGroupEditorId, libraryAgentId, groupForm.defaultModelId || activeModelId);
+      setGroupProfiles(updated);
+      setLibraryTargetProfileId(updated[updated.length - 1]?.id || updated[0]?.id || '');
+      const groups = await backend.listAgentGroups();
+      setAgentGroups(groups);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setAddingLibraryAgentId('');
+    }
+  }
+
+  async function handleReplaceSoulFromLibrary(libraryAgentId: string) {
+    if (!libraryTargetProfileId) {
+      return;
+    }
+    setAddingLibraryAgentId(libraryAgentId);
+    setError('');
+    try {
+      const savedSoul = await backend.replaceAgentSoulFromLibrary(libraryTargetProfileId, libraryAgentId, false);
+      setSoulEditor(savedSoul);
+      const profiles = await backend.listAgentProfiles(selectedGroupEditorId);
+      setGroupProfiles(profiles);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setAddingLibraryAgentId('');
+    }
+  }
+
+  async function handleOpenSoul(profile: AgentProfile) {
+    setError('');
+    try {
+      const soul = await backend.getAgentSoul(profile.id);
+      setSoulEditor(soul);
+      setGroupProfiles((previous) =>
+        previous.map((item) => (item.id === profile.id ? { ...item, soulPath: soul.path } : item)),
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function handleSaveSoul(event: FormEvent) {
+    event.preventDefault();
+    if (!soulEditor) {
+      return;
+    }
+    setSavingSoul(true);
+    setError('');
+    try {
+      const saved = await backend.saveAgentSoul(soulEditor.profileId, soulEditor.content);
+      setSoulEditor(saved);
+      setGroupProfiles((previous) =>
+        previous.map((item) => (item.id === saved.profileId ? { ...item, soulPath: saved.path } : item)),
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingSoul(false);
+    }
+  }
+
+  async function handleSelectLifecycle(lifecycleId: string) {
+    setSelectedLifecycleId(lifecycleId);
+    setLifecycleForm(groupLifecycles.find((item) => item.id === lifecycleId) ?? null);
+    setLifecycleStepForm(null);
+    setError('');
+    try {
+      setLifecycleSteps(lifecycleId ? await backend.listLifecycleSteps(lifecycleId) : []);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function handleSaveLifecycle(event: FormEvent) {
+    event.preventDefault();
+    if (!lifecycleForm) {
+      return;
+    }
+    setSavingLifecycle(true);
+    setError('');
+    try {
+      const updated = await backend.saveLifecycleDefinition(lifecycleForm);
+      setGroupLifecycles(updated);
+      const saved = updated.find((item) => item.id === lifecycleForm.id) ?? updated[0];
+      if (saved) {
+        setSelectedLifecycleId(saved.id);
+        setLifecycleForm(saved);
+        setLifecycleSteps(await backend.listLifecycleSteps(saved.id));
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingLifecycle(false);
+    }
+  }
+
+  function handleNewLifecycleStep() {
+    setLifecycleStepForm({
+      id: '',
+      lifecycleId: selectedLifecycleId,
+      stepKey: 'custom_step',
+      title: 'Новый шаг',
+      agentProfileId: groupProfiles[0]?.id ?? '',
+      mode: 'llm',
+      required: true,
+      canRetry: true,
+      maxRetries: 1,
+      onSuccessStepKey: '',
+      onFailureStepKey: '',
+      outputSchema: '',
+      visibleToUser: true,
+      sortOrder: lifecycleSteps.length,
+    });
+  }
+
+  async function handleSaveLifecycleStep(event: FormEvent) {
+    event.preventDefault();
+    if (!lifecycleStepForm) {
+      return;
+    }
+    setSavingLifecycleStep(true);
+    setError('');
+    try {
+      const updated = await backend.saveLifecycleStep(lifecycleStepForm);
+      setLifecycleSteps(updated);
+      setLifecycleStepForm(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSavingLifecycleStep(false);
+    }
+  }
+
+  async function handleDeleteLifecycleStep(step: LifecycleStep) {
+    setError('');
+    try {
+      const updated = await backend.deleteLifecycleStep(step.id, step.lifecycleId);
+      setLifecycleSteps(updated);
+      if (lifecycleStepForm?.id === step.id) {
+        setLifecycleStepForm(null);
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
   async function handleApplyChanges() {
     if (!selectedProjectId || !workflowRun?.id || pendingChanges.length === 0 || applyingChanges) {
       return;
@@ -618,6 +1111,35 @@ function App() {
       setError(errorMessage(err));
     } finally {
       setApplyingChanges(false);
+    }
+  }
+
+  async function handleRollbackChanges() {
+    if (!selectedProjectId || !workflowRun?.id || rollingBackChanges) {
+      return;
+    }
+    const appliedCount = visibleChanges.filter((change) => change.status === 'applied').length;
+    if (appliedCount === 0) {
+      return;
+    }
+    const confirmed = window.confirm(`Откатить примененные изменения этого workflow? Файлов: ${appliedCount}.`);
+    if (!confirmed) {
+      return;
+    }
+
+    setRollingBackChanges(true);
+    setError('');
+    try {
+      const state = await backend.rollbackWorkflowChanges(selectedProjectId, workflowRun.id);
+      applyChatState(state);
+      setAgents(state.agents);
+      if (state.error) {
+        setError(state.error);
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setRollingBackChanges(false);
     }
   }
 
@@ -860,7 +1382,7 @@ function App() {
           </form>
         )}
 
-        {(visibleChanges.length > 0 || planSteps.length > 0) && (
+        {(visibleChanges.length > 0 || visibleWebSources.length > 0 || planSteps.length > 0) && (
           <div className="dock-row" aria-label="Сводка выполнения">
             {visibleChanges.length > 0 && (
               <ChangeSummaryDock
@@ -870,9 +1392,18 @@ function App() {
                 isOpen={changesDockOpen}
                 expandedDiffIds={expandedDiffIds}
                 applyingChanges={applyingChanges}
+                rollingBackChanges={rollingBackChanges}
                 onToggleOpen={() => setChangesDockOpen((value) => !value)}
                 onToggleDiff={toggleDiff}
                 onApplyChanges={handleApplyChanges}
+                onRollbackChanges={handleRollbackChanges}
+              />
+            )}
+            {visibleWebSources.length > 0 && (
+              <WebSourcesDock
+                sources={visibleWebSources}
+                isOpen={sourcesDockOpen}
+                onToggleOpen={() => setSourcesDockOpen((value) => !value)}
               />
             )}
             {planSteps.length > 0 && <StepDock plan={workflowPlan} steps={planSteps} />}
@@ -894,31 +1425,6 @@ function App() {
       </section>
 
       <aside className="sidebar agents-panel">
-        {webSources.length > 0 && (
-          <section className="right-section web-sources-section">
-            <div className="panel-heading compact">
-              <div>
-                <h2>Источники</h2>
-              </div>
-              <span className="review-status medium">{webSources.length}</span>
-            </div>
-            <div className="web-source-list">
-              {webSources.slice(0, 6).map((source, index) => (
-                <a
-                  key={source.id || source.url || index}
-                  className="web-source-item"
-                  href={source.url}
-                  onClick={(event) => openExternalLink(event, source.url)}
-                >
-                  <strong>{source.title || hostFromUrl(source.url)}</strong>
-                  <span>{hostFromUrl(source.url)}</span>
-                  {source.snippet && <p>{shortPreview(source.snippet, 110)}</p>}
-                </a>
-              ))}
-            </div>
-          </section>
-        )}
-
         <section className="right-section artifacts-section">
           <div className="panel-heading compact">
             <div>
@@ -995,6 +1501,13 @@ function App() {
                 LLM
               </button>
               <button
+                className={settingsTab === 'groups' ? 'active' : ''}
+                type="button"
+                onClick={() => setSettingsTab('groups')}
+              >
+                Группы
+              </button>
+              <button
                 className={settingsTab === 'web' ? 'active' : ''}
                 type="button"
                 onClick={() => setSettingsTab('web')}
@@ -1039,6 +1552,13 @@ function App() {
                         value={newProjectName}
                         onChange={(event) => setNewProjectName(event.target.value)}
                       />
+                      <ProjectGroupSelect
+                        id="new-project-group"
+                        label="Группа"
+                        groups={agentGroups}
+                        value={newProjectGroupId || defaultProjectGroupId(agentGroups)}
+                        onChange={setNewProjectGroupId}
+                      />
                       <button className="primary-button" type="submit">
                         Создать
                       </button>
@@ -1059,9 +1579,758 @@ function App() {
                         value={existingProjectPath}
                         onChange={(event) => setExistingProjectPath(event.target.value)}
                       />
+                      <ProjectGroupSelect
+                        id="existing-project-group"
+                        label="Группа"
+                        groups={agentGroups}
+                        value={existingProjectGroupId || defaultProjectGroupId(agentGroups)}
+                        onChange={setExistingProjectGroupId}
+                      />
                       <button className="primary-button" type="submit">
                         Добавить
                       </button>
+                    </form>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {settingsTab === 'groups' && (
+              <div className="settings-content settings-groups">
+                <section className="settings-section">
+                  <div className="settings-section-heading">
+                    <div>
+                      <h3>Группа проекта</h3>
+                      <p className="muted">
+                        {currentProject
+                          ? `${currentProject.name}: ${currentAgentGroup?.name ?? 'Dev Squad'}`
+                          : 'Выбери проект, чтобы назначить ему группу.'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="group-choice-list">
+                    {agentGroups.map((group) => (
+                      <button
+                        key={group.id}
+                        className={`group-choice ${group.id === groupBinding?.groupId ? 'active' : ''}`}
+                        type="button"
+                        disabled={!selectedProjectId}
+                        onClick={() => void handleBindProjectGroup(group.id)}
+                      >
+                        <span>
+                          <strong>{group.name}</strong>
+                          <small>{groupKindLabel(group.kind)} · {group.agentCount} агентов</small>
+                        </span>
+                        <span className="group-kind-pill">{group.id === groupBinding?.groupId ? 'активна' : groupKindLabel(group.kind)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-heading">
+                    <div>
+                      <h3>Библиотека агентов</h3>
+                      <p className="muted">Готовые локальные агенты: добавь в группу или замени `soul.md` выбранному агенту.</p>
+                    </div>
+                    <select
+                      className="input compact-select"
+                      value={libraryTargetProfileId}
+                      disabled={groupProfiles.length === 0}
+                      onChange={(event) => setLibraryTargetProfileId(event.target.value)}
+                    >
+                      {groupProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="agent-library-list">
+                    {agentLibrary.map((item) => (
+                      <article key={item.id} className="agent-library-card">
+                        <div>
+                          <div className="agent-library-heading">
+                            <strong>{item.name}</strong>
+                            <span>{item.category}</span>
+                          </div>
+                          <span>{item.roleKey}</span>
+                          <p>{item.description}</p>
+                          <div className="agent-capability-list">
+                            {(item.tags || []).slice(0, 3).map((tag) => (
+                              <span key={tag} className="agent-capability-chip muted-chip">
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="group-agent-actions">
+                          <button
+                            className="small-button secondary"
+                            type="button"
+                            disabled={!selectedGroupEditorId || addingLibraryAgentId === item.id}
+                            onClick={() => void handleAddLibraryAgent(item.id)}
+                          >
+                            Добавить
+                          </button>
+                          <button
+                            className="small-button secondary"
+                            type="button"
+                            disabled={!libraryTargetProfileId || addingLibraryAgentId === item.id}
+                            onClick={() => void handleReplaceSoulFromLibrary(item.id)}
+                          >
+                            soul.md
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-heading">
+                    <div>
+                      <h3>Шаблоны команд</h3>
+                      <p className="muted">Быстрый старт: создай группу из шаблона и донастрой агентов, soul.md и lifecycle.</p>
+                    </div>
+                  </div>
+                  <div className="group-template-list">
+                    {agentGroupTemplates.map((template) => (
+                      <article key={template.id} className="group-template-card">
+                        <div>
+                          <strong>{template.name}</strong>
+                          <span>{groupKindLabel(template.kind)} · {template.agentCount} агентов · {template.stepCount} шагов</span>
+                          <p>{template.description}</p>
+                        </div>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={savingGroup}
+                          onClick={() => void handleCreateGroupFromTemplate(template.id)}
+                        >
+                          Создать
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-heading">
+                    <div>
+                      <h3>Команды агентов</h3>
+                      <p className="muted">Состав группы, модель по умолчанию, soul.md и lifecycle.</p>
+                    </div>
+                    <button className="icon-button" type="button" title="Новая группа" onClick={handleNewGroup}>
+                      +
+                    </button>
+                  </div>
+
+                  <div className="group-editor-layout">
+                    <div className="group-list">
+                      {agentGroups.map((group) => (
+                        <button
+                          key={group.id}
+                          className={`group-list-item ${group.id === selectedGroupEditorId ? 'active' : ''}`}
+                          type="button"
+                          onClick={() => setSelectedGroupEditorId(group.id)}
+                        >
+                          <strong>{group.name}</strong>
+                          <span>{groupKindLabel(group.kind)} · {group.agentCount} агентов</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    <form className="group-form" onSubmit={handleSaveGroup}>
+                      <label className="field-label" htmlFor="group-name">
+                        Название
+                      </label>
+                      <input
+                        id="group-name"
+                        className="input"
+                        value={groupForm.name}
+                        onChange={(event) => setGroupForm({ ...groupForm, name: event.target.value })}
+                        placeholder="Например, My Dev Team"
+                      />
+
+                      <label className="field-label" htmlFor="group-kind">
+                        Тип
+                      </label>
+                      <select
+                        id="group-kind"
+                        className="input"
+                        value={groupForm.kind}
+                        onChange={(event) => setGroupForm({ ...groupForm, kind: event.target.value })}
+                      >
+                        <option value="dev">Dev</option>
+                        <option value="ctf">CTF</option>
+                        <option value="research">Research</option>
+                        <option value="security">Security</option>
+                        <option value="custom">Custom</option>
+                      </select>
+
+                      <label className="field-label" htmlFor="group-model">
+                        Модель по умолчанию
+                      </label>
+                      <select
+                        id="group-model"
+                        className="input"
+                        value={groupForm.defaultModelId}
+                        onChange={(event) => setGroupForm({ ...groupForm, defaultModelId: event.target.value })}
+                      >
+                        {models.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name}
+                          </option>
+                        ))}
+                      </select>
+
+                      <label className="field-label" htmlFor="group-description">
+                        Описание
+                      </label>
+                      <textarea
+                        id="group-description"
+                        className="input textarea"
+                        value={groupForm.description}
+                        onChange={(event) => setGroupForm({ ...groupForm, description: event.target.value })}
+                        placeholder="Для чего эта команда и какие задачи она решает"
+                      />
+
+                      <div className="model-form-actions">
+                        <button className="primary-button" type="submit" disabled={savingGroup || !groupForm.name.trim()}>
+                          {savingGroup ? 'Сохраняю...' : groupForm.id ? 'Сохранить группу' : 'Создать группу'}
+                        </button>
+                        <button
+                          className="action-button secondary"
+                          type="button"
+                          disabled={!groupForm.id || groupForm.id === 'group_dev_squad' || groupForm.id === 'group_ctf_cell'}
+                          onClick={() => void handleArchiveGroup(groupForm.id)}
+                        >
+                          Архивировать
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-heading">
+                    <div>
+                      <h3>Агенты группы</h3>
+                      <p className="muted">Состав команды, роли, модели и `soul.md` каждого агента.</p>
+                    </div>
+                    <button className="icon-button" type="button" title="Добавить агента" disabled={!selectedGroupEditorId} onClick={handleNewAgent}>
+                      +
+                    </button>
+                  </div>
+
+                  <div className="group-agent-list">
+                    {groupProfiles.map((profile) => (
+                      <article key={profile.id} className={`group-agent-card ${profile.enabled ? '' : 'disabled'}`}>
+                        <div>
+                          <strong>{profile.name}</strong>
+                          <span>{profile.roleKey}</span>
+                          {profile.description && <p>{profile.description}</p>}
+                          <div className="agent-capability-list">
+                            {(profile.capabilities || []).slice(0, 3).map((capability) => (
+                              <span key={capability} className="agent-capability-chip">
+                                {capability}
+                              </span>
+                            ))}
+                            {(profile.capabilities || []).length > 3 && (
+                              <span className="agent-capability-chip muted-chip">+{profile.capabilities.length - 3}</span>
+                            )}
+                          </div>
+                          <div className="agent-access-meta">
+                            <span>tools {(profile.allowedTools || []).length}</span>
+                            <span>read {(profile.readPaths || []).length}</span>
+                            <span>write {(profile.writePaths || []).length}</span>
+                            <span>handoff {(profile.handoffRules || []).length}</span>
+                          </div>
+                        </div>
+                        <div className="group-agent-actions">
+                          <button className="small-button secondary" type="button" onClick={() => setAgentForm(profile)}>
+                            Править
+                          </button>
+                          <button className="small-button secondary" type="button" onClick={() => void handleOpenSoul(profile)}>
+                            soul.md
+                          </button>
+                          <button className="small-button secondary" type="button" onClick={() => void handleDuplicateAgent(profile)}>
+                            Копировать
+                          </button>
+                          <button className="small-button" type="button" onClick={() => void handleToggleAgent(profile)}>
+                            {profile.enabled ? 'Отключить' : 'Включить'}
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                    {groupProfiles.length === 0 && <p className="panel-note">Выбери группу или создай первого агента.</p>}
+                  </div>
+
+                  {agentForm && (
+                    <form className="agent-profile-form" onSubmit={handleSaveAgent}>
+                      <div className="settings-grid-two">
+                        <label className="field-label" htmlFor="agent-name">
+                          Имя
+                        </label>
+                        <input
+                          id="agent-name"
+                          className="input"
+                          value={agentForm.name}
+                          onChange={(event) => setAgentForm({ ...agentForm, name: event.target.value })}
+                        />
+
+                        <label className="field-label" htmlFor="agent-role">
+                          Роль
+                        </label>
+                        <input
+                          id="agent-role"
+                          className="input"
+                          value={agentForm.roleKey}
+                          onChange={(event) => setAgentForm({ ...agentForm, roleKey: event.target.value })}
+                        />
+
+                        <label className="field-label" htmlFor="agent-model">
+                          Модель
+                        </label>
+                        <select
+                          id="agent-model"
+                          className="input"
+                          value={agentForm.modelId}
+                          onChange={(event) => setAgentForm({ ...agentForm, modelId: event.target.value })}
+                        >
+                          {models.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.name}
+                            </option>
+                          ))}
+                        </select>
+
+                        <label className="field-label" htmlFor="agent-context">
+                          Context budget
+                        </label>
+                        <input
+                          id="agent-context"
+                          className="input"
+                          type="number"
+                          min={1000}
+                          value={agentForm.contextBudget}
+                          onChange={(event) => setAgentForm({ ...agentForm, contextBudget: Number(event.target.value) })}
+                        />
+                      </div>
+
+                      <label className="field-label" htmlFor="agent-description">
+                        Описание
+                      </label>
+                      <textarea
+                        id="agent-description"
+                        className="input textarea"
+                        value={agentForm.description}
+                        onChange={(event) => setAgentForm({ ...agentForm, description: event.target.value })}
+                      />
+
+                      <div className="agent-capabilities-editor">
+                        <label className="field-label" htmlFor="agent-capabilities">
+                          Что умеет
+                        </label>
+                        <textarea
+                          id="agent-capabilities"
+                          className="input textarea compact-textarea"
+                          value={listToLines(agentForm.capabilities || [])}
+                          placeholder="Один capability на строку"
+                          onChange={(event) => setAgentForm({ ...agentForm, capabilities: linesToList(event.target.value) })}
+                        />
+
+                        <label className="field-label" htmlFor="agent-tools">
+                          Разрешенные инструменты
+                        </label>
+                        <textarea
+                          id="agent-tools"
+                          className="input textarea compact-textarea"
+                          value={listToLines(agentForm.allowedTools || [])}
+                          placeholder="Команды, tool profiles или встроенные инструменты"
+                          onChange={(event) => setAgentForm({ ...agentForm, allowedTools: linesToList(event.target.value) })}
+                        />
+
+                        <div className="settings-grid-two">
+                          <div>
+                            <label className="field-label" htmlFor="agent-read-paths">
+                              Может читать
+                            </label>
+                            <textarea
+                              id="agent-read-paths"
+                              className="input textarea compact-textarea"
+                              value={listToLines(agentForm.readPaths || [])}
+                              placeholder="README*, docs/**, internal/**"
+                              onChange={(event) => setAgentForm({ ...agentForm, readPaths: linesToList(event.target.value) })}
+                            />
+                          </div>
+                          <div>
+                            <label className="field-label" htmlFor="agent-write-paths">
+                              Может писать
+                            </label>
+                            <textarea
+                              id="agent-write-paths"
+                              className="input textarea compact-textarea"
+                              value={listToLines(agentForm.writePaths || [])}
+                              placeholder="docs/**, solve/**, ./**/*.go"
+                              onChange={(event) => setAgentForm({ ...agentForm, writePaths: linesToList(event.target.value) })}
+                            />
+                          </div>
+                        </div>
+
+                        <label className="field-label" htmlFor="agent-handoff">
+                          Когда передавать дальше
+                        </label>
+                        <textarea
+                          id="agent-handoff"
+                          className="input textarea compact-textarea"
+                          value={listToLines(agentForm.handoffRules || [])}
+                          placeholder="Один handoff rule на строку"
+                          onChange={(event) => setAgentForm({ ...agentForm, handoffRules: linesToList(event.target.value) })}
+                        />
+                      </div>
+
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={agentForm.enabled}
+                          onChange={(event) => setAgentForm({ ...agentForm, enabled: event.target.checked })}
+                        />
+                        <span>Агент включен</span>
+                      </label>
+
+                      <div className="model-form-actions">
+                        <button className="primary-button" type="submit" disabled={savingAgent || !agentForm.name.trim()}>
+                          {savingAgent ? 'Сохраняю...' : 'Сохранить агента'}
+                        </button>
+                        <button className="action-button secondary" type="button" onClick={() => setAgentForm(null)}>
+                          Отмена
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {soulEditor && (
+                    <form className="soul-editor-form" onSubmit={handleSaveSoul}>
+                      <div className="settings-section-heading">
+                        <div>
+                          <h3>soul.md</h3>
+                          <p className="muted">{soulEditor.path}</p>
+                        </div>
+                        <button className="icon-button" type="button" title="Закрыть soul.md" onClick={() => setSoulEditor(null)}>
+                          ×
+                        </button>
+                      </div>
+                      {soulEditor.warnings.length > 0 && (
+                        <div className="soul-warning-list">
+                          {soulEditor.warnings.map((warning) => (
+                            <p key={warning}>{warning}</p>
+                          ))}
+                        </div>
+                      )}
+                      <textarea
+                        className="input textarea soul-textarea"
+                        value={soulEditor.content}
+                        onChange={(event) => setSoulEditor({ ...soulEditor, content: event.target.value })}
+                      />
+                      <div className="model-form-actions">
+                        <button className="primary-button" type="submit" disabled={savingSoul || !soulEditor.content.trim()}>
+                          {savingSoul ? 'Сохраняю...' : 'Сохранить soul.md'}
+                        </button>
+                        <button className="action-button secondary" type="button" onClick={() => setSoulEditor(null)}>
+                          Закрыть
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </section>
+
+                <section className="settings-section">
+                  <div className="settings-section-heading">
+                    <div>
+                      <h3>Lifecycle</h3>
+                      <p className="muted">Шаги, возвраты, видимость и retry-политика группы.</p>
+                    </div>
+                    <button className="icon-button" type="button" title="Добавить шаг" disabled={!selectedLifecycleId} onClick={handleNewLifecycleStep}>
+                      +
+                    </button>
+                  </div>
+                  {groupLifecycles.length > 0 && (
+                    <div className="lifecycle-editor-shell">
+                      <label className="field-label" htmlFor="lifecycle-select">
+                        Активный сценарий
+                      </label>
+                      <select
+                        id="lifecycle-select"
+                        className="input"
+                        value={selectedLifecycleId}
+                        onChange={(event) => void handleSelectLifecycle(event.target.value)}
+                      >
+                        {groupLifecycles.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </select>
+
+                      {lifecycleForm && (
+                        <form className="lifecycle-form" onSubmit={handleSaveLifecycle}>
+                          <div className="settings-grid-two">
+                            <label className="field-label" htmlFor="lifecycle-name">
+                              Название
+                            </label>
+                            <input
+                              id="lifecycle-name"
+                              className="input"
+                              value={lifecycleForm.name}
+                              onChange={(event) => setLifecycleForm({ ...lifecycleForm, name: event.target.value })}
+                            />
+
+                            <label className="field-label" htmlFor="lifecycle-kind">
+                              Тип
+                            </label>
+                            <input
+                              id="lifecycle-kind"
+                              className="input"
+                              value={lifecycleForm.kind}
+                              onChange={(event) => setLifecycleForm({ ...lifecycleForm, kind: event.target.value })}
+                            />
+
+                            <label className="field-label" htmlFor="lifecycle-max-total">
+                              Max steps
+                            </label>
+                            <input
+                              id="lifecycle-max-total"
+                              className="input"
+                              type="number"
+                              min={1}
+                              value={lifecycleForm.maxTotalIterations}
+                              onChange={(event) => setLifecycleForm({ ...lifecycleForm, maxTotalIterations: Number(event.target.value) })}
+                            />
+
+                            <label className="field-label" htmlFor="lifecycle-max-repair">
+                              Repair retries
+                            </label>
+                            <input
+                              id="lifecycle-max-repair"
+                              className="input"
+                              type="number"
+                              min={0}
+                              value={lifecycleForm.maxRepairIterations}
+                              onChange={(event) => setLifecycleForm({ ...lifecycleForm, maxRepairIterations: Number(event.target.value) })}
+                            />
+
+                            <label className="field-label" htmlFor="lifecycle-same-error">
+                              Same error limit
+                            </label>
+                            <input
+                              id="lifecycle-same-error"
+                              className="input"
+                              type="number"
+                              min={1}
+                              value={lifecycleForm.sameErrorLimit}
+                              onChange={(event) => setLifecycleForm({ ...lifecycleForm, sameErrorLimit: Number(event.target.value) })}
+                            />
+                          </div>
+                          <label className="field-label" htmlFor="lifecycle-description">
+                            Описание
+                          </label>
+                          <textarea
+                            id="lifecycle-description"
+                            className="input textarea compact"
+                            value={lifecycleForm.description}
+                            onChange={(event) => setLifecycleForm({ ...lifecycleForm, description: event.target.value })}
+                          />
+                          <div className="model-form-actions">
+                            <button className="primary-button" type="submit" disabled={savingLifecycle || !lifecycleForm.name.trim()}>
+                              {savingLifecycle ? 'Сохраняю...' : 'Сохранить lifecycle'}
+                            </button>
+                          </div>
+                        </form>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="lifecycle-preview-list">
+                    {lifecycleSteps.map((step, index) => {
+                      const profile = groupProfiles.find((item) => item.id === step.agentProfileId);
+                      return (
+                        <div key={step.id} className={`lifecycle-preview-item ${step.required ? '' : 'optional'}`}>
+                          <span>{index + 1}</span>
+                          <div>
+                            <strong>{step.title}</strong>
+                            <p>{profile?.name ?? 'агент не назначен'} · {step.mode} · {step.canRetry ? `retry ${step.maxRetries}` : 'без retry'}</p>
+                            {step.onFailureStepKey && <p>при ошибке → {step.onFailureStepKey}</p>}
+                          </div>
+                          <div className="lifecycle-item-actions">
+                            <button className="small-button secondary" type="button" onClick={() => setLifecycleStepForm(step)}>
+                              Править
+                            </button>
+                            <button className="small-button danger" type="button" onClick={() => void handleDeleteLifecycleStep(step)}>
+                              Удалить
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {lifecycleSteps.length === 0 && <p className="panel-note">В lifecycle пока нет шагов.</p>}
+                  </div>
+
+                  {lifecycleStepForm && (
+                    <form className="lifecycle-step-form" onSubmit={handleSaveLifecycleStep}>
+                      <div className="settings-section-heading">
+                        <div>
+                          <h3>{lifecycleStepForm.id ? 'Редактировать шаг' : 'Новый шаг'}</h3>
+                          <p className="muted">Ключ шага используется executor для переходов и статуса.</p>
+                        </div>
+                        <button className="icon-button" type="button" title="Закрыть редактор шага" onClick={() => setLifecycleStepForm(null)}>
+                          ×
+                        </button>
+                      </div>
+                      <div className="settings-grid-two">
+                        <label className="field-label" htmlFor="lifecycle-step-title">
+                          Название
+                        </label>
+                        <input
+                          id="lifecycle-step-title"
+                          className="input"
+                          value={lifecycleStepForm.title}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, title: event.target.value })}
+                        />
+
+                        <label className="field-label" htmlFor="lifecycle-step-key">
+                          Step key
+                        </label>
+                        <input
+                          id="lifecycle-step-key"
+                          className="input"
+                          value={lifecycleStepForm.stepKey}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, stepKey: event.target.value })}
+                        />
+
+                        <label className="field-label" htmlFor="lifecycle-step-agent">
+                          Агент
+                        </label>
+                        <select
+                          id="lifecycle-step-agent"
+                          className="input"
+                          value={lifecycleStepForm.agentProfileId}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, agentProfileId: event.target.value })}
+                        >
+                          <option value="">Не назначен</option>
+                          {groupProfiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.name} · {profile.roleKey}
+                            </option>
+                          ))}
+                        </select>
+
+                        <label className="field-label" htmlFor="lifecycle-step-mode">
+                          Режим
+                        </label>
+                        <select
+                          id="lifecycle-step-mode"
+                          className="input"
+                          value={lifecycleStepForm.mode}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, mode: event.target.value })}
+                        >
+                          {lifecycleModes.map((mode) => (
+                            <option key={mode} value={mode}>
+                              {mode}
+                            </option>
+                          ))}
+                        </select>
+
+                        <label className="field-label" htmlFor="lifecycle-step-order">
+                          Порядок
+                        </label>
+                        <input
+                          id="lifecycle-step-order"
+                          className="input"
+                          type="number"
+                          min={0}
+                          value={lifecycleStepForm.sortOrder}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, sortOrder: Number(event.target.value) })}
+                        />
+
+                        <label className="field-label" htmlFor="lifecycle-step-retries">
+                          Retries
+                        </label>
+                        <input
+                          id="lifecycle-step-retries"
+                          className="input"
+                          type="number"
+                          min={0}
+                          value={lifecycleStepForm.maxRetries}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, maxRetries: Number(event.target.value) })}
+                        />
+
+                        <label className="field-label" htmlFor="lifecycle-step-success">
+                          On success
+                        </label>
+                        <input
+                          id="lifecycle-step-success"
+                          className="input"
+                          value={lifecycleStepForm.onSuccessStepKey}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, onSuccessStepKey: event.target.value })}
+                          placeholder="пусто = следующий"
+                        />
+
+                        <label className="field-label" htmlFor="lifecycle-step-failure">
+                          On failure
+                        </label>
+                        <input
+                          id="lifecycle-step-failure"
+                          className="input"
+                          value={lifecycleStepForm.onFailureStepKey}
+                          onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, onFailureStepKey: event.target.value })}
+                          placeholder="например developer_plan"
+                        />
+                      </div>
+                      <div className="lifecycle-toggles">
+                        <label className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={lifecycleStepForm.required}
+                            onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, required: event.target.checked })}
+                          />
+                          <span>Обязательный</span>
+                        </label>
+                        <label className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={lifecycleStepForm.canRetry}
+                            onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, canRetry: event.target.checked })}
+                          />
+                          <span>Можно повторять</span>
+                        </label>
+                        <label className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={lifecycleStepForm.visibleToUser}
+                            onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, visibleToUser: event.target.checked })}
+                          />
+                          <span>Показывать в ходе работы</span>
+                        </label>
+                      </div>
+                      <label className="field-label" htmlFor="lifecycle-step-schema">
+                        Output schema
+                      </label>
+                      <textarea
+                        id="lifecycle-step-schema"
+                        className="input textarea compact"
+                        value={lifecycleStepForm.outputSchema}
+                        onChange={(event) => setLifecycleStepForm({ ...lifecycleStepForm, outputSchema: event.target.value })}
+                      />
+                      <div className="model-form-actions">
+                        <button className="primary-button" type="submit" disabled={savingLifecycleStep || !lifecycleStepForm.title.trim() || !lifecycleStepForm.stepKey.trim()}>
+                          {savingLifecycleStep ? 'Сохраняю...' : 'Сохранить шаг'}
+                        </button>
+                        <button className="action-button secondary" type="button" onClick={() => setLifecycleStepForm(null)}>
+                          Отмена
+                        </button>
+                      </div>
                     </form>
                   )}
                 </section>
@@ -1465,9 +2734,11 @@ function ChangeSummaryDock({
   isOpen,
   expandedDiffIds,
   applyingChanges,
+  rollingBackChanges,
   onToggleOpen,
   onToggleDiff,
   onApplyChanges,
+  onRollbackChanges,
 }: {
   changes: DisplayChange[];
   summary: ChangeSummary;
@@ -1475,10 +2746,13 @@ function ChangeSummaryDock({
   isOpen: boolean;
   expandedDiffIds: string[];
   applyingChanges: boolean;
+  rollingBackChanges: boolean;
   onToggleOpen: () => void;
   onToggleDiff: (id: string) => void;
   onApplyChanges: () => void;
+  onRollbackChanges: () => void;
 }) {
+  const appliedCount = changes.filter((change) => change.status === 'applied').length;
   return (
     <section className="changes-dock" aria-label="Изменения файлов">
       {isOpen && (
@@ -1517,10 +2791,24 @@ function ChangeSummaryDock({
               );
             })}
           </div>
-          {pendingCount > 0 && (
-            <button className="apply-changes-button dock-apply" type="button" disabled={applyingChanges} onClick={onApplyChanges}>
-              {applyingChanges ? 'Применяю...' : `Применить ${pendingCount}`}
-            </button>
+          {(pendingCount > 0 || appliedCount > 0) && (
+            <div className="changes-dock-actions">
+              {appliedCount > 0 && (
+                <button
+                  className="rollback-changes-button"
+                  type="button"
+                  disabled={rollingBackChanges}
+                  onClick={onRollbackChanges}
+                >
+                  {rollingBackChanges ? 'Откатываю...' : `Откатить ${appliedCount}`}
+                </button>
+              )}
+              {pendingCount > 0 && (
+                <button className="apply-changes-button dock-apply" type="button" disabled={applyingChanges} onClick={onApplyChanges}>
+                  {applyingChanges ? 'Применяю...' : `Применить ${pendingCount}`}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -1530,6 +2818,78 @@ function ChangeSummaryDock({
           <span className="diff-added">+{summary.added}</span>
           <span className="diff-removed"> -{summary.removed}</span>
         </span>
+      </button>
+    </section>
+  );
+}
+
+function WebSourcesDock({
+  sources,
+  isOpen,
+  onToggleOpen,
+}: {
+  sources: WebSource[];
+  isOpen: boolean;
+  onToggleOpen: () => void;
+}) {
+  const [copiedSourceId, setCopiedSourceId] = useState('');
+
+  async function handleCopySource(source: WebSource) {
+    const value = source.url.trim();
+    if (!value) {
+      return;
+    }
+    await copyToClipboard(value);
+    setCopiedSourceId(source.id || source.url);
+    window.setTimeout(() => setCopiedSourceId(''), 1200);
+  }
+
+  return (
+    <section className="sources-dock" aria-label="Источники исследования">
+      {isOpen && (
+        <div className="sources-dock-popover">
+          <div className="sources-dock-header">
+            <strong>{sourcesTitle(sources.length)}</strong>
+            <span>web sources</span>
+          </div>
+          <div className="sources-dock-list">
+            {sources.map((source, index) => {
+              const sourceId = source.id || source.url || String(index);
+              const title = source.title || hostFromUrl(source.url) || `Источник ${index + 1}`;
+              const excerpt = source.contentExcerpt || source.snippet;
+              const date = formatSourceDate(source);
+              return (
+                <article key={sourceId} className="sources-dock-item">
+                  <div className="sources-dock-item-main">
+                    <a href={source.url} onClick={(event) => openExternalLink(event, source.url)}>
+                      {title}
+                    </a>
+                    <div className="sources-dock-meta">
+                      <span>{hostFromUrl(source.url)}</span>
+                      {source.sourceType && <span>{sourceTypeLabel(source.sourceType)}</span>}
+                      {date && <span>{date}</span>}
+                      <span className={`source-trust ${sourceTrustKind(source.trustLevel)}`}>
+                        {sourceTrustLabel(source.trustLevel)}
+                      </span>
+                    </div>
+                    {excerpt && <p>{shortPreview(excerpt, 180)}</p>}
+                  </div>
+                  <div className="sources-dock-actions">
+                    <button type="button" onClick={() => openExternalUrl(source.url)}>
+                      Открыть
+                    </button>
+                    <button type="button" onClick={() => void handleCopySource(source)}>
+                      {copiedSourceId === sourceId ? 'Скопировано' : 'Копировать'}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      <button className={`sources-dock-pill ${isOpen ? 'active' : ''}`} type="button" onClick={onToggleOpen}>
+        <span>{sourcesTitle(sources.length)}</span>
       </button>
     </section>
   );
@@ -1587,6 +2947,45 @@ function DiffViewer({ diffText }: { diffText: string }) {
         </span>
       ))}
     </pre>
+  );
+}
+
+function ProjectGroupSelect({
+  id,
+  label,
+  groups,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  groups: AgentGroup[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const selectedGroup = groups.find((group) => group.id === value);
+  return (
+    <label className="project-group-select" htmlFor={id}>
+      <span>{label}</span>
+      <select
+        id={id}
+        className="input"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={groups.length === 0}
+      >
+        {groups.map((group) => (
+          <option key={group.id} value={group.id}>
+            {group.name}
+          </option>
+        ))}
+      </select>
+      <small>
+        {selectedGroup
+          ? `${groupKindLabel(selectedGroup.kind)} · ${selectedGroup.agentCount} агентов`
+          : 'Dev Squad будет выбран по умолчанию'}
+      </small>
+    </label>
   );
 }
 
@@ -1741,6 +3140,27 @@ function agentForStep(stepKey: string): string {
     return 'security';
   }
   if (stepKey === 'web_research') {
+    return 'researcher';
+  }
+  if (stepKey === 'source_review') {
+    return 'source_reviewer';
+  }
+  if (stepKey === 'research_synthesis') {
+    return 'analyst';
+  }
+  if (stepKey === 'research_notes') {
+    return 'researcher';
+  }
+  if (stepKey === 'scope_check' || stepKey === 'artifact_collection' || stepKey === 'triage') {
+    return 'ctf_scout';
+  }
+  if (stepKey === 'category_solver') {
+    return 'ctf_web';
+  }
+  if (stepKey === 'validation') {
+    return 'ctf_validator';
+  }
+  if (stepKey === 'intake' || stepKey === 'hypothesis_board' || stepKey === 'writeup') {
     return 'manager';
   }
   if (stepKey === 'product_requirements') {
@@ -1783,11 +3203,50 @@ function agentNameById(agentId: string): string {
   if (agentId === 'security') {
     return 'ИБ-специалист';
   }
+  if (agentId === 'researcher') {
+    return 'Исследователь';
+  }
+  if (agentId === 'source_reviewer') {
+    return 'Проверяющая источники';
+  }
+  if (agentId === 'analyst') {
+    return 'Аналитик';
+  }
+  if (agentId === 'ctf_scout') {
+    return 'Разведчик';
+  }
+  if (agentId === 'ctf_web') {
+    return 'Web Exploiter';
+  }
+  if (agentId === 'ctf_lfi') {
+    return 'LFI Hunter';
+  }
+  if (agentId === 'ctf_rce') {
+    return 'RCE Analyst';
+  }
+  if (agentId === 'ctf_sqli') {
+    return 'SQLi Solver';
+  }
+  if (agentId === 'ctf_pwn') {
+    return 'Pwner';
+  }
+  if (agentId === 'ctf_crypto') {
+    return 'Криптограф';
+  }
+  if (agentId === 'ctf_reverse') {
+    return 'Реверсер';
+  }
+  if (agentId === 'ctf_forensics') {
+    return 'Форензик';
+  }
+  if (agentId === 'ctf_validator') {
+    return 'Валидатор';
+  }
   return 'Люмен';
 }
 
 function avatarForAgent(agentId: string): string {
-  if (agentId === 'security') {
+  if (agentId === 'security' || agentId.startsWith('ctf_')) {
     return securityAvatar;
   }
   if (agentId === 'product') {
@@ -1851,6 +3310,76 @@ function agentInfoById(agentId: string): AgentInfo {
       responsibility: 'Scope, риски, threat model, безопасные проверки и remediation plan.',
     };
   }
+  if (agentId === 'researcher') {
+    return {
+      title: 'ищет источники',
+      why: 'Чтобы актуальные вопросы опирались на публичные источники, а не на догадки модели.',
+      responsibility: 'Поисковые запросы, сбор страниц, первичные excerpts, source notes и сохранение research notes.',
+    };
+  }
+  if (agentId === 'source_reviewer') {
+    return {
+      title: 'проверяет источники',
+      why: 'Чтобы в ответ не попадали устаревшие, слабые или противоречивые ссылки.',
+      responsibility: 'Свежесть, trust level, прямые ссылки, противоречия и недостающие источники.',
+    };
+  }
+  if (agentId === 'analyst') {
+    return {
+      title: 'собирает аналитику',
+      why: 'Чтобы сравнить источники и отделить подтвержденные факты от выводов.',
+      responsibility: 'Синтез, сравнение, ограничения, краткий ответ и цитируемые выводы.',
+    };
+  }
+  if (agentId === 'ctf_scout') {
+    return {
+      title: 'собирает вводные CTF',
+      why: 'Чтобы challenge не решался вслепую и не выходил за scope.',
+      responsibility: 'Категория, scope, артефакты, evidence и первые гипотезы.',
+    };
+  }
+  if (agentId === 'ctf_web' || agentId === 'ctf_lfi' || agentId === 'ctf_rce' || agentId === 'ctf_sqli') {
+    return {
+      title: 'решает web-категорию',
+      why: 'Чтобы web/LFI/RCE/SQLi challenge разбирались отдельным профильным агентом.',
+      responsibility: 'Гипотезы, безопасные проверки в рамках CTF/lab scope, payload notes и путь к flag.',
+    };
+  }
+  if (agentId === 'ctf_pwn') {
+    return {
+      title: 'разбирает binary exploitation',
+      why: 'Чтобы pwn задачи не смешивались с обычной web-разработкой.',
+      responsibility: 'Локальный анализ бинарей, memory safety гипотезы, solver notes и воспроизводимость.',
+    };
+  }
+  if (agentId === 'ctf_crypto') {
+    return {
+      title: 'решает crypto challenge',
+      why: 'Чтобы криптографические задачи шли через математику и solver-скрипты.',
+      responsibility: 'Шифры, ключи, oracle-гипотезы, proof notes и аккуратный writeup.',
+    };
+  }
+  if (agentId === 'ctf_reverse') {
+    return {
+      title: 'разбирает reverse engineering',
+      why: 'Чтобы реверс шёл через локальный анализ артефактов, а не через общий dev-пайплайн.',
+      responsibility: 'Строки, CFG, псевдокод, форматы файлов, solver notes и evidence.',
+    };
+  }
+  if (agentId === 'ctf_forensics') {
+    return {
+      title: 'ищет evidence в артефактах',
+      why: 'Чтобы forensics задачи разбирались через файлы, метаданные, дампы и сетевые следы.',
+      responsibility: 'PCAP, images, EXIF, memory/file carving, timeline и writeup.',
+    };
+  }
+  if (agentId === 'ctf_validator') {
+    return {
+      title: 'проверяет CTF-решение',
+      why: 'Чтобы writeup был воспроизводимым и не содержал выдуманного flag.',
+      responsibility: 'Flag/result, evidence, scope, повторяемость шагов и пробелы.',
+    };
+  }
   return {
     title: 'входной контур завода',
     why: 'Чтобы понять намерение пользователя и выбрать: ответить сразу или запустить пайплайн.',
@@ -1864,6 +3393,9 @@ function workflowOrderFor(run: WorkflowRun | null | undefined, steps: WorkflowSt
   }
   if (run?.currentStep === 'web_research' || steps.some((step) => step.stepKey === 'web_research')) {
     return researchWorkflowStepOrder;
+  }
+  if (ctfWorkflowStepOrder.includes(run?.currentStep || '') || steps.some((step) => ctfWorkflowStepOrder.includes(step.stepKey))) {
+    return ctfWorkflowStepOrder;
   }
   return workflowStepOrder;
 }
@@ -2067,6 +3599,10 @@ function splitLinkSuffix(rawUrl: string): { url: string; suffix: string } {
 
 function openExternalLink(event: MouseEvent<HTMLAnchorElement>, url: string) {
   event.preventDefault();
+  openExternalUrl(url);
+}
+
+function openExternalUrl(url: string) {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -2102,6 +3638,106 @@ function hostFromUrl(value: string): string {
   } catch {
     return value;
   }
+}
+
+function compactWebSources(items: WebSource[]): WebSource[] {
+  const byUrl = new Map<string, WebSource>();
+  for (const item of items) {
+    const key = normalizeSourceUrl(item.url);
+    if (!key) {
+      continue;
+    }
+    const previous = byUrl.get(key);
+    if (!previous || sourceScore(item) >= sourceScore(previous)) {
+      byUrl.set(key, item);
+    }
+  }
+  return Array.from(byUrl.values()).sort((left, right) => sourceTime(right) - sourceTime(left));
+}
+
+function normalizeSourceUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '').toLowerCase();
+  } catch {
+    return value.trim().toLowerCase();
+  }
+}
+
+function sourceScore(source: WebSource): number {
+  let score = sourceTime(source);
+  if (source.contentExcerpt) {
+    score += 3;
+  }
+  if (source.snippet) {
+    score += 2;
+  }
+  if (source.title && source.title !== source.url) {
+    score += 1;
+  }
+  return score;
+}
+
+function sourceTime(source: WebSource): number {
+  const raw = source.fetchedAt || source.createdAt;
+  const value = new Date(raw).getTime();
+  return Number.isNaN(value) ? 0 : value;
+}
+
+function sourcesTitle(count: number): string {
+  if (count % 10 === 1 && count % 100 !== 11) {
+    return `Источник ${count}`;
+  }
+  if ([2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100)) {
+    return `Источника ${count}`;
+  }
+  return `Источников ${count}`;
+}
+
+function sourceTrustKind(value: string): string {
+  switch (value) {
+    case 'high':
+    case 'medium':
+    case 'low':
+      return value;
+    case 'normal':
+      return 'medium';
+    default:
+      return 'unknown';
+  }
+}
+
+function sourceTrustLabel(value: string): string {
+  switch (value) {
+    case 'high':
+      return 'высокое доверие';
+    case 'medium':
+    case 'normal':
+      return 'среднее доверие';
+    case 'low':
+      return 'низкое доверие';
+    default:
+      return 'доверие не оценено';
+  }
+}
+
+function sourceTypeLabel(value: string): string {
+  switch (value) {
+    case 'weather':
+      return 'погода';
+    case 'currency':
+      return 'курс валют';
+    case 'web':
+      return 'страница';
+    default:
+      return value;
+  }
+}
+
+function formatSourceDate(source: WebSource): string {
+  const date = formatDateTime(source.fetchedAt || source.createdAt);
+  return date ? `получено ${date}` : '';
 }
 
 function stepIcon(status: string, index: number): ReactNode {
@@ -2316,6 +3952,29 @@ function blueprintConfidenceLabel(value: string): string {
     default:
       return value || 'уверенность не указана';
   }
+}
+
+function groupKindLabel(kind: string): string {
+  switch (kind) {
+    case 'dev':
+      return 'разработка';
+    case 'ctf':
+      return 'CTF';
+    case 'research':
+      return 'исследования';
+    case 'security':
+      return 'ИБ';
+    default:
+      return 'кастомная';
+  }
+}
+
+function defaultProjectGroupId(groups: AgentGroup[]): string {
+  return groups.find((group) => group.id === 'group_dev_squad')?.id ?? groups[0]?.id ?? '';
+}
+
+function lifecycleForGroup(groups: AgentGroup[], groupId: string): string {
+  return groups.find((group) => group.id === groupId)?.defaultLifecycleId ?? '';
 }
 
 function workflowStepPreview(step: WorkflowStep, stepKey: string): string {

@@ -40,6 +40,13 @@ func TestRoutePentestTask(t *testing.T) {
 	}
 }
 
+func TestRouteCTFTask(t *testing.T) {
+	decision := Route("реши CTF web challenge с LFI и подготовь writeup", Context{})
+	if decision.Intent != IntentPentestTask || !decision.NeedsWorkflow {
+		t.Fatalf("expected CTF task to use pentest workflow route, got %#v", decision)
+	}
+}
+
 func TestRouteSecurityCodingWordsToSecurityWorkflow(t *testing.T) {
 	decision := Route("исправь sql injection и сделай аудит безопасности", Context{})
 	if decision.Intent != IntentPentestTask || !decision.NeedsWorkflow {

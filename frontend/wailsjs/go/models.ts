@@ -1,3 +1,184 @@
+export namespace agentgroups {
+	
+	export class Group {
+	    id: string;
+	    name: string;
+	    slug: string;
+	    kind: string;
+	    description: string;
+	    defaultModelId: string;
+	    defaultLifecycleId: string;
+	    status: string;
+	    createdAt: string;
+	    updatedAt: string;
+	    agentCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Group(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.slug = source["slug"];
+	        this.kind = source["kind"];
+	        this.description = source["description"];
+	        this.defaultModelId = source["defaultModelId"];
+	        this.defaultLifecycleId = source["defaultLifecycleId"];
+	        this.status = source["status"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	        this.agentCount = source["agentCount"];
+	    }
+	}
+	export class LifecycleDefinition {
+	    id: string;
+	    groupId: string;
+	    name: string;
+	    kind: string;
+	    description: string;
+	    maxTotalIterations: number;
+	    maxRepairIterations: number;
+	    sameErrorLimit: number;
+	    status: string;
+	    createdAt: string;
+	    updatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LifecycleDefinition(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.groupId = source["groupId"];
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.description = source["description"];
+	        this.maxTotalIterations = source["maxTotalIterations"];
+	        this.maxRepairIterations = source["maxRepairIterations"];
+	        this.sameErrorLimit = source["sameErrorLimit"];
+	        this.status = source["status"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+	export class LifecycleStep {
+	    id: string;
+	    lifecycleId: string;
+	    stepKey: string;
+	    title: string;
+	    agentProfileId: string;
+	    mode: string;
+	    required: boolean;
+	    canRetry: boolean;
+	    maxRetries: number;
+	    onSuccessStepKey: string;
+	    onFailureStepKey: string;
+	    outputSchema: string;
+	    visibleToUser: boolean;
+	    sortOrder: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new LifecycleStep(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.lifecycleId = source["lifecycleId"];
+	        this.stepKey = source["stepKey"];
+	        this.title = source["title"];
+	        this.agentProfileId = source["agentProfileId"];
+	        this.mode = source["mode"];
+	        this.required = source["required"];
+	        this.canRetry = source["canRetry"];
+	        this.maxRetries = source["maxRetries"];
+	        this.onSuccessStepKey = source["onSuccessStepKey"];
+	        this.onFailureStepKey = source["onFailureStepKey"];
+	        this.outputSchema = source["outputSchema"];
+	        this.visibleToUser = source["visibleToUser"];
+	        this.sortOrder = source["sortOrder"];
+	    }
+	}
+	export class Profile {
+	    id: string;
+	    groupId: string;
+	    name: string;
+	    roleKey: string;
+	    description: string;
+	    avatarPath: string;
+	    soulPath: string;
+	    modelId: string;
+	    toolProfileId: string;
+	    capabilities: string[];
+	    allowedTools: string[];
+	    readPaths: string[];
+	    writePaths: string[];
+	    handoffRules: string[];
+	    temperature: number;
+	    contextBudget: number;
+	    enabled: boolean;
+	    sortOrder: number;
+	    createdAt: string;
+	    updatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Profile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.groupId = source["groupId"];
+	        this.name = source["name"];
+	        this.roleKey = source["roleKey"];
+	        this.description = source["description"];
+	        this.avatarPath = source["avatarPath"];
+	        this.soulPath = source["soulPath"];
+	        this.modelId = source["modelId"];
+	        this.toolProfileId = source["toolProfileId"];
+	        this.capabilities = source["capabilities"];
+	        this.allowedTools = source["allowedTools"];
+	        this.readPaths = source["readPaths"];
+	        this.writePaths = source["writePaths"];
+	        this.handoffRules = source["handoffRules"];
+	        this.temperature = source["temperature"];
+	        this.contextBudget = source["contextBudget"];
+	        this.enabled = source["enabled"];
+	        this.sortOrder = source["sortOrder"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+	export class ProjectBinding {
+	    id: string;
+	    projectId: string;
+	    groupId: string;
+	    lifecycleId: string;
+	    isDefault: boolean;
+	    createdAt: string;
+	    updatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProjectBinding(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.projectId = source["projectId"];
+	        this.groupId = source["groupId"];
+	        this.lifecycleId = source["lifecycleId"];
+	        this.isDefault = source["isDefault"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+
+}
+
 export namespace agents {
 	
 	export class Status {
@@ -29,9 +210,27 @@ export namespace agents {
 
 export namespace app {
 	
+	export class AddAgentFromLibraryInput {
+	    groupId: string;
+	    libraryAgentId: string;
+	    modelId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AddAgentFromLibraryInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.groupId = source["groupId"];
+	        this.libraryAgentId = source["libraryAgentId"];
+	        this.modelId = source["modelId"];
+	    }
+	}
 	export class AddExistingProjectInput {
 	    name: string;
 	    path: string;
+	    groupId: string;
+	    lifecycleId: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AddExistingProjectInput(source);
@@ -41,6 +240,82 @@ export namespace app {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
 	        this.path = source["path"];
+	        this.groupId = source["groupId"];
+	        this.lifecycleId = source["lifecycleId"];
+	    }
+	}
+	export class AgentGroupTemplateDTO {
+	    id: string;
+	    name: string;
+	    kind: string;
+	    description: string;
+	    agentCount: number;
+	    stepCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AgentGroupTemplateDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.description = source["description"];
+	        this.agentCount = source["agentCount"];
+	        this.stepCount = source["stepCount"];
+	    }
+	}
+	export class AgentLibraryItemDTO {
+	    id: string;
+	    name: string;
+	    roleKey: string;
+	    category: string;
+	    description: string;
+	    toolProfileId: string;
+	    capabilities: string[];
+	    allowedTools: string[];
+	    readPaths: string[];
+	    writePaths: string[];
+	    handoffRules: string[];
+	    tags: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new AgentLibraryItemDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.roleKey = source["roleKey"];
+	        this.category = source["category"];
+	        this.description = source["description"];
+	        this.toolProfileId = source["toolProfileId"];
+	        this.capabilities = source["capabilities"];
+	        this.allowedTools = source["allowedTools"];
+	        this.readPaths = source["readPaths"];
+	        this.writePaths = source["writePaths"];
+	        this.handoffRules = source["handoffRules"];
+	        this.tags = source["tags"];
+	    }
+	}
+	export class AgentSoulDTO {
+	    profileId: string;
+	    path: string;
+	    content: string;
+	    warnings: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new AgentSoulDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.profileId = source["profileId"];
+	        this.path = source["path"];
+	        this.content = source["content"];
+	        this.warnings = source["warnings"];
 	    }
 	}
 	export class ApplyWorkflowChangesInput {
@@ -55,6 +330,34 @@ export namespace app {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.projectId = source["projectId"];
 	        this.workflowRunId = source["workflowRunId"];
+	    }
+	}
+	export class ArchiveAgentGroupInput {
+	    groupId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ArchiveAgentGroupInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.groupId = source["groupId"];
+	    }
+	}
+	export class BindProjectAgentGroupInput {
+	    projectId: string;
+	    groupId: string;
+	    lifecycleId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BindProjectAgentGroupInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.projectId = source["projectId"];
+	        this.groupId = source["groupId"];
+	        this.lifecycleId = source["lifecycleId"];
 	    }
 	}
 	export class ClarificationQuestion {
@@ -118,10 +421,14 @@ export namespace app {
 	    artifacts: artifacts.Artifact[];
 	    blueprint?: blueprint.Blueprint;
 	    clarification?: ClarificationDTO;
+	    taskSpec?: taskspec.Spec;
+	    projectMemory?: projectmemory.Memory;
 	    changes: changes.ProposedChange[];
 	    testRuns: checks.TestRun[];
 	    reviews: reviews.ReviewRun[];
 	    webSources: webresearch.Source[];
+	    agentGroup?: agentgroups.Group;
+	    groupBinding?: agentgroups.ProjectBinding;
 	
 	    static createFrom(source: any = {}) {
 	        return new ProjectState(source);
@@ -139,10 +446,14 @@ export namespace app {
 	        this.artifacts = this.convertValues(source["artifacts"], artifacts.Artifact);
 	        this.blueprint = this.convertValues(source["blueprint"], blueprint.Blueprint);
 	        this.clarification = this.convertValues(source["clarification"], ClarificationDTO);
+	        this.taskSpec = this.convertValues(source["taskSpec"], taskspec.Spec);
+	        this.projectMemory = this.convertValues(source["projectMemory"], projectmemory.Memory);
 	        this.changes = this.convertValues(source["changes"], changes.ProposedChange);
 	        this.testRuns = this.convertValues(source["testRuns"], checks.TestRun);
 	        this.reviews = this.convertValues(source["reviews"], reviews.ReviewRun);
 	        this.webSources = this.convertValues(source["webSources"], webresearch.Source);
+	        this.agentGroup = this.convertValues(source["agentGroup"], agentgroups.Group);
+	        this.groupBinding = this.convertValues(source["groupBinding"], agentgroups.ProjectBinding);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -172,6 +483,9 @@ export namespace app {
 	    models: llm.ModelConfig[];
 	    activeModelId: string;
 	    webSettings: webresearch.Settings;
+	    agentGroups: agentgroups.Group[];
+	    agentGroupTemplates: AgentGroupTemplateDTO[];
+	    agentLibrary: AgentLibraryItemDTO[];
 	
 	    static createFrom(source: any = {}) {
 	        return new BootstrapState(source);
@@ -187,6 +501,9 @@ export namespace app {
 	        this.models = this.convertValues(source["models"], llm.ModelConfig);
 	        this.activeModelId = source["activeModelId"];
 	        this.webSettings = this.convertValues(source["webSettings"], webresearch.Settings);
+	        this.agentGroups = this.convertValues(source["agentGroups"], agentgroups.Group);
+	        this.agentGroupTemplates = this.convertValues(source["agentGroupTemplates"], AgentGroupTemplateDTO);
+	        this.agentLibrary = this.convertValues(source["agentLibrary"], AgentLibraryItemDTO);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -218,10 +535,14 @@ export namespace app {
 	    artifacts: artifacts.Artifact[];
 	    blueprint?: blueprint.Blueprint;
 	    clarification?: ClarificationDTO;
+	    taskSpec?: taskspec.Spec;
+	    projectMemory?: projectmemory.Memory;
 	    changes: changes.ProposedChange[];
 	    testRuns: checks.TestRun[];
 	    reviews: reviews.ReviewRun[];
 	    webSources: webresearch.Source[];
+	    agentGroup?: agentgroups.Group;
+	    groupBinding?: agentgroups.ProjectBinding;
 	    agents: agents.Status[];
 	    error?: string;
 	
@@ -241,10 +562,14 @@ export namespace app {
 	        this.artifacts = this.convertValues(source["artifacts"], artifacts.Artifact);
 	        this.blueprint = this.convertValues(source["blueprint"], blueprint.Blueprint);
 	        this.clarification = this.convertValues(source["clarification"], ClarificationDTO);
+	        this.taskSpec = this.convertValues(source["taskSpec"], taskspec.Spec);
+	        this.projectMemory = this.convertValues(source["projectMemory"], projectmemory.Memory);
 	        this.changes = this.convertValues(source["changes"], changes.ProposedChange);
 	        this.testRuns = this.convertValues(source["testRuns"], checks.TestRun);
 	        this.reviews = this.convertValues(source["reviews"], reviews.ReviewRun);
 	        this.webSources = this.convertValues(source["webSources"], webresearch.Source);
+	        this.agentGroup = this.convertValues(source["agentGroup"], agentgroups.Group);
+	        this.groupBinding = this.convertValues(source["groupBinding"], agentgroups.ProjectBinding);
 	        this.agents = this.convertValues(source["agents"], agents.Status);
 	        this.error = source["error"];
 	    }
@@ -285,8 +610,46 @@ export namespace app {
 	}
 	
 	
+	export class CreateAgentGroupFromTemplateInput {
+	    templateId: string;
+	    name: string;
+	    defaultModelId: string;
+	    selectForProjectId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateAgentGroupFromTemplateInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.templateId = source["templateId"];
+	        this.name = source["name"];
+	        this.defaultModelId = source["defaultModelId"];
+	        this.selectForProjectId = source["selectForProjectId"];
+	    }
+	}
+	export class CreateAgentGroupInput {
+	    name: string;
+	    kind: string;
+	    description: string;
+	    defaultModelId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateAgentGroupInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.description = source["description"];
+	        this.defaultModelId = source["defaultModelId"];
+	    }
+	}
 	export class CreateProjectInput {
 	    name: string;
+	    groupId: string;
+	    lifecycleId: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new CreateProjectInput(source);
@@ -295,6 +658,22 @@ export namespace app {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
+	        this.groupId = source["groupId"];
+	        this.lifecycleId = source["lifecycleId"];
+	    }
+	}
+	export class DeleteLifecycleStepInput {
+	    stepId: string;
+	    lifecycleId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DeleteLifecycleStepInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.stepId = source["stepId"];
+	        this.lifecycleId = source["lifecycleId"];
 	    }
 	}
 	export class DeleteProjectInput {
@@ -309,7 +688,49 @@ export namespace app {
 	        this.projectId = source["projectId"];
 	    }
 	}
+	export class DuplicateAgentProfileInput {
+	    profileId: string;
 	
+	    static createFrom(source: any = {}) {
+	        return new DuplicateAgentProfileInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.profileId = source["profileId"];
+	    }
+	}
+	
+	export class ReplaceAgentSoulFromLibraryInput {
+	    profileId: string;
+	    libraryAgentId: string;
+	    replaceContract: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReplaceAgentSoulFromLibraryInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.profileId = source["profileId"];
+	        this.libraryAgentId = source["libraryAgentId"];
+	        this.replaceContract = source["replaceContract"];
+	    }
+	}
+	export class RollbackWorkflowChangesInput {
+	    projectId: string;
+	    workflowRunId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RollbackWorkflowChangesInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.projectId = source["projectId"];
+	        this.workflowRunId = source["workflowRunId"];
+	    }
+	}
 	export class RunReviewInput {
 	    projectId: string;
 	    workflowRunId: string;
@@ -336,6 +757,132 @@ export namespace app {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.projectId = source["projectId"];
 	        this.testRunId = source["testRunId"];
+	    }
+	}
+	export class SaveAgentProfileInput {
+	    id: string;
+	    groupId: string;
+	    name: string;
+	    roleKey: string;
+	    description: string;
+	    avatarPath: string;
+	    soulPath: string;
+	    modelId: string;
+	    toolProfileId: string;
+	    capabilities: string[];
+	    allowedTools: string[];
+	    readPaths: string[];
+	    writePaths: string[];
+	    handoffRules: string[];
+	    temperature: number;
+	    contextBudget: number;
+	    enabled: boolean;
+	    sortOrder: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveAgentProfileInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.groupId = source["groupId"];
+	        this.name = source["name"];
+	        this.roleKey = source["roleKey"];
+	        this.description = source["description"];
+	        this.avatarPath = source["avatarPath"];
+	        this.soulPath = source["soulPath"];
+	        this.modelId = source["modelId"];
+	        this.toolProfileId = source["toolProfileId"];
+	        this.capabilities = source["capabilities"];
+	        this.allowedTools = source["allowedTools"];
+	        this.readPaths = source["readPaths"];
+	        this.writePaths = source["writePaths"];
+	        this.handoffRules = source["handoffRules"];
+	        this.temperature = source["temperature"];
+	        this.contextBudget = source["contextBudget"];
+	        this.enabled = source["enabled"];
+	        this.sortOrder = source["sortOrder"];
+	    }
+	}
+	export class SaveAgentSoulInput {
+	    profileId: string;
+	    content: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveAgentSoulInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.profileId = source["profileId"];
+	        this.content = source["content"];
+	    }
+	}
+	export class SaveLifecycleDefinitionInput {
+	    id: string;
+	    groupId: string;
+	    name: string;
+	    kind: string;
+	    description: string;
+	    maxTotalIterations: number;
+	    maxRepairIterations: number;
+	    sameErrorLimit: number;
+	    status: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveLifecycleDefinitionInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.groupId = source["groupId"];
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.description = source["description"];
+	        this.maxTotalIterations = source["maxTotalIterations"];
+	        this.maxRepairIterations = source["maxRepairIterations"];
+	        this.sameErrorLimit = source["sameErrorLimit"];
+	        this.status = source["status"];
+	    }
+	}
+	export class SaveLifecycleStepInput {
+	    id: string;
+	    lifecycleId: string;
+	    stepKey: string;
+	    title: string;
+	    agentProfileId: string;
+	    mode: string;
+	    required: boolean;
+	    canRetry: boolean;
+	    maxRetries: number;
+	    onSuccessStepKey: string;
+	    onFailureStepKey: string;
+	    outputSchema: string;
+	    visibleToUser: boolean;
+	    sortOrder: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveLifecycleStepInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.lifecycleId = source["lifecycleId"];
+	        this.stepKey = source["stepKey"];
+	        this.title = source["title"];
+	        this.agentProfileId = source["agentProfileId"];
+	        this.mode = source["mode"];
+	        this.required = source["required"];
+	        this.canRetry = source["canRetry"];
+	        this.maxRetries = source["maxRetries"];
+	        this.onSuccessStepKey = source["onSuccessStepKey"];
+	        this.onFailureStepKey = source["onFailureStepKey"];
+	        this.outputSchema = source["outputSchema"];
+	        this.visibleToUser = source["visibleToUser"];
+	        this.sortOrder = source["sortOrder"];
 	    }
 	}
 	export class SaveModelConfigInput {
@@ -398,6 +945,20 @@ export namespace app {
 	        this.content = source["content"];
 	    }
 	}
+	export class SetAgentProfileEnabledInput {
+	    profileId: string;
+	    enabled: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SetAgentProfileEnabledInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.profileId = source["profileId"];
+	        this.enabled = source["enabled"];
+	    }
+	}
 	export class SubmitClarificationInput {
 	    projectId: string;
 	    workflowRunId: string;
@@ -431,6 +992,26 @@ export namespace app {
 		    }
 		    return a;
 		}
+	}
+	export class UpdateAgentGroupInput {
+	    id: string;
+	    name: string;
+	    kind: string;
+	    description: string;
+	    defaultModelId: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateAgentGroupInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.description = source["description"];
+	        this.defaultModelId = source["defaultModelId"];
+	    }
 	}
 	export class UpdateProjectInput {
 	    projectId: string;
@@ -749,6 +1330,7 @@ export namespace config {
 	export class Paths {
 	    codeDir: string;
 	    projectsDir: string;
+	    agentsDir: string;
 	    dbPath: string;
 	
 	    static createFrom(source: any = {}) {
@@ -759,6 +1341,7 @@ export namespace config {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.codeDir = source["codeDir"];
 	        this.projectsDir = source["projectsDir"];
+	        this.agentsDir = source["agentsDir"];
 	        this.dbPath = source["dbPath"];
 	    }
 	}
@@ -831,9 +1414,53 @@ export namespace project {
 
 }
 
+export namespace projectmemory {
+	
+	export class Memory {
+	    id: string;
+	    projectId: string;
+	    architecture: string;
+	    stack: string;
+	    runtime: string;
+	    projectType: string;
+	    buildCommands: string[];
+	    testCommands: string[];
+	    styleGuide: string[];
+	    decisions: string[];
+	    environment: string[];
+	    updatedFromTaskId: string;
+	    createdAt: string;
+	    updatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Memory(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.projectId = source["projectId"];
+	        this.architecture = source["architecture"];
+	        this.stack = source["stack"];
+	        this.runtime = source["runtime"];
+	        this.projectType = source["projectType"];
+	        this.buildCommands = source["buildCommands"];
+	        this.testCommands = source["testCommands"];
+	        this.styleGuide = source["styleGuide"];
+	        this.decisions = source["decisions"];
+	        this.environment = source["environment"];
+	        this.updatedFromTaskId = source["updatedFromTaskId"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+
+}
+
 export namespace reviews {
 	
 	export class Finding {
+	    category?: string;
 	    severity: string;
 	    file_path: string;
 	    message: string;
@@ -845,6 +1472,7 @@ export namespace reviews {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.category = source["category"];
 	        this.severity = source["severity"];
 	        this.file_path = source["file_path"];
 	        this.message = source["message"];
@@ -891,6 +1519,87 @@ export namespace reviews {
 	        this.startedAt = source["startedAt"];
 	        this.finishedAt = source["finishedAt"];
 	        this.createdAt = source["createdAt"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace taskspec {
+	
+	export class AcceptedAnswer {
+	    questionId: string;
+	    question: string;
+	    answer: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AcceptedAnswer(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.questionId = source["questionId"];
+	        this.question = source["question"];
+	        this.answer = source["answer"];
+	    }
+	}
+	export class Spec {
+	    id: string;
+	    projectId: string;
+	    taskId: string;
+	    workflowRunId: string;
+	    userRequest: string;
+	    summary: string;
+	    goal: string;
+	    requirements: string[];
+	    acceptanceCriteria: string[];
+	    decisions: string[];
+	    openQuestions: string[];
+	    acceptedAnswers: AcceptedAnswer[];
+	    status: string;
+	    source: string;
+	    createdAt: string;
+	    updatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Spec(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.projectId = source["projectId"];
+	        this.taskId = source["taskId"];
+	        this.workflowRunId = source["workflowRunId"];
+	        this.userRequest = source["userRequest"];
+	        this.summary = source["summary"];
+	        this.goal = source["goal"];
+	        this.requirements = source["requirements"];
+	        this.acceptanceCriteria = source["acceptanceCriteria"];
+	        this.decisions = source["decisions"];
+	        this.openQuestions = source["openQuestions"];
+	        this.acceptedAnswers = this.convertValues(source["acceptedAnswers"], AcceptedAnswer);
+	        this.status = source["status"];
+	        this.source = source["source"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

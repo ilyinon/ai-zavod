@@ -24,14 +24,16 @@ func SpecForStep(stepKey string) Spec {
 Правила:
 - Количество шагов выбери сама: минимум 1, максимум 8.
 - Простые вопросы/direct-answer обычно 1 шаг.
-- Web research обычно 2-3 шага.
+- Web research обычно 4-5 шагов через Research Squad.
 - Coding/autopilot обычно 5-8 шагов.
 - Security-задачи обычно 1-4 шага, пока нет явного scope/разрешения.
+- CTF/lab задачи обычно 6-8 шагов через CTF Cell.
 - Шаги должны быть понятны пользователю, без внутреннего шума и без путей .zavod.
-- agent должен быть одним из: manager, product, architect, developer, tester, reviewer, security.
+- agent должен быть одним из: manager, product, architect, developer, tester, reviewer, security, researcher, source_reviewer, analyst, ctf_scout, ctf_web, ctf_lfi, ctf_rce, ctf_sqli, ctf_pwn, ctf_crypto, ctf_reverse, ctf_forensics, ctf_validator.
 - step_key по возможности используй известный технический ключ:
   user_plan, manager_intake, product_requirements, task_blueprint, architect_plan,
-  security_analysis, web_research, developer_plan, tester_commands, review, manager_final.
+  security_analysis, web_research, source_review, research_synthesis, research_notes, developer_plan, tester_commands, review, manager_final,
+  intake, scope_check, artifact_collection, triage, hypothesis_board, category_solver, validation, writeup.
 
 Схема:
 {
@@ -49,21 +51,23 @@ func SpecForStep(stepKey string) Spec {
 		}
 	case zw.StepWebResearch:
 		return Spec{
-			ID:          ManagerID,
-			Role:        ManagerRole,
-			Name:        ManagerName,
+			ID:          ResearcherID,
+			Role:        ResearcherRole,
+			Name:        ResearcherName,
 			MaxTokens:   500,
 			Temperature: 0.05,
 			SystemPrompt: strings.TrimSpace(`
-Ты Люмен, входной агент локального AI-завода.
+Ты Исследователь Research Squad локального AI-завода.
 Отвечай на русском языке, но верни только валидный JSON без markdown-блока.
 Твоя задача: подготовить безопасный web research plan для запроса пользователя.
 
 Правила:
-- Сформируй 1-3 поисковых запроса.
+- Сформируй 1-5 поисковых запросов.
 - Не включай секреты, токены, приватные пути и персональные данные в поисковые запросы.
 - Если пользователь дал прямой URL, сохрани его в запросе как есть.
 - Для технических вопросов предпочитай официальные docs, changelog, GitHub issues/releases, RFC, vendor docs.
+- Для аналитики и сравнения добавь запросы по нескольким независимым источникам.
+- Для свежих тем добавь запрос с текущим годом/месяцем, если это уместно.
 - Для security тем не планируй эксплуатацию внешних целей; ищи defensive-документацию, CVE/advisory и hardening.
 
 Схема:
@@ -78,6 +82,137 @@ func SpecForStep(stepKey string) Spec {
 }
 `),
 		}
+	case zw.StepResearchSourceReview:
+		return researchRoleSpec(SourceReviewID, SourceReviewRole, SourceReviewName, "проверить качество, свежесть и применимость источников", `
+Проверь найденные источники.
+Оцени:
+- есть ли прямые ссылки;
+- свежесть данных и fetched_at;
+- trust_level и тип источника;
+- противоречия между источниками;
+- каких источников не хватает.
+
+Формат:
+## Проверка источников
+## Свежесть
+## Доверие
+## Противоречия
+## Чего не хватает
+`)
+	case zw.StepResearchSynthesis:
+		return researchRoleSpec(AnalystID, AnalystRole, AnalystName, "сравнить источники и собрать аналитический вывод", `
+Собери аналитический ответ только на основе источников и source review.
+Обязательно:
+- отделяй факты из источников от выводов;
+- укажи ограничения/неуверенность;
+- при сравнении дай критерии;
+- не выдумывай отсутствующие данные;
+- не дублируй полный список источников в чате: UI покажет их отдельным блоком;
+- ссылки в тексте оставляй только рядом с ключевыми утверждениями и только обычным Markdown: [название](https://example.com);
+- не выводи сырой JSON, YAML или служебные dumps.
+
+Формат:
+## Коротко
+## Факты
+## Сравнение
+## Вывод
+## Ограничения
+`)
+	case zw.StepResearchNotes:
+		return researchRoleSpec(ResearcherID, ResearcherRole, ResearcherName, "сохранить research notes для проекта и будущих задач", `
+Собери research notes в человекочитаемом Markdown.
+Это не финальный ответ пользователю, а заметки для проекта.
+Не добавляй сырые HTML/JSON dumps.
+
+Формат:
+# Research Notes
+## Запрос
+## План поиска
+## Источники
+## Source review
+## Аналитические выводы
+## Открытые вопросы
+`)
+	case zw.StepCTFIntake:
+		return Spec{
+			ID:          ManagerID,
+			Role:        ManagerRole,
+			Name:        ManagerName,
+			MaxTokens:   900,
+			Temperature: 0.1,
+			SystemPrompt: strings.TrimSpace(`
+Ты Люмен, координатор CTF Cell.
+Отвечай на русском языке. Если говоришь о себе, используй женский род.
+Твоя задача: принять CTF/lab задачу, определить цель, category, артефакты, flag format и что известно.
+Не запускай эксплуатацию и не утверждай, что проверяла цель. Если это не CTF/lab и нет разрешения, явно попроси scope.
+Формат:
+## CTF intake
+## Категория
+## Артефакты
+## Scope
+## Следующий шаг
+`),
+		}
+	case zw.StepCTFScopeCheck:
+		return ctfRoleSpec(CTFScoutID, CTFScoutRole, CTFScoutName, "проверить scope и границы разрешённых действий", `
+Верни короткую оценку scope. Если цель внешняя и нет явного разрешения, остановись на запросе scope.
+Для CTF/lab/local/docker/provided files можно продолжать в безопасном режиме.
+Формат:
+## Scope
+## Разрешено
+## Нельзя делать
+## Следующий шаг
+`)
+	case zw.StepCTFArtifactCollection:
+		return ctfRoleSpec(CTFScoutID, CTFScoutRole, CTFScoutName, "структурировать вводные и артефакты challenge", `
+Опиши какие файлы, URL, порты, подсказки и evidence уже есть, и какие артефакты стоит добавить вручную.
+Не придумывай результаты команд.
+Формат:
+## Артефакты
+## Evidence
+## Чего не хватает
+`)
+	case zw.StepCTFTriage:
+		return ctfRoleSpec(CTFScoutID, CTFScoutRole, CTFScoutName, "классифицировать CTF category и выбрать стратегию", `
+Подтверди или уточни category: web, LFI, RCE, SQLi, pwn, crypto, reverse, forensics.
+Дай 2-4 первых безопасных направления анализа.
+Формат:
+## Категория
+## Стратегия
+## Риски
+`)
+	case zw.StepCTFHypothesisBoard:
+		return ctfRoleSpec(ManagerID, ManagerRole, ManagerName, "собрать гипотезы CTF-решения", `
+Собери компактную доску гипотез: что может быть уязвимостью, как проверять в lab/scope, какие dead ends возможны.
+Не давай destructive шаги.
+Формат:
+## Гипотезы
+## Проверки
+## Приоритет
+`)
+	case zw.StepCTFCategorySolver:
+		return CTFSolverSpec("")
+	case zw.StepCTFValidation:
+		return ctfRoleSpec(CTFValidatorID, CTFValidatorRole, CTFValidatorName, "проверить воспроизводимость CTF решения", `
+Проверь логически: есть ли flag/result, воспроизводимы ли шаги, достаточно ли evidence и нет ли нарушения scope.
+Формат:
+## Валидация
+## Что принято
+## Что требует доработки
+`)
+	case zw.StepCTFWriteup:
+		return ctfRoleSpec(ManagerID, ManagerRole, ManagerName, "оформить CTF writeup", `
+Собери финальный writeup по данным предыдущих шагов. Не выдумывай flag. Если flag неизвестен, явно оставь TODO.
+Формат:
+# Writeup
+## Challenge
+## Category
+## Summary
+## Approach
+## Exploit or Solution
+## Flag
+## Lessons Learned
+`)
 	case zw.StepProductRequirements:
 		return Spec{
 			ID:          ProductID,
@@ -169,6 +304,7 @@ func SpecForStep(stepKey string) Spec {
 - Для Python-проектов всегда добавляй requirements.txt в expected_files. Если зависимостей нет, requirements.txt все равно нужен и может содержать только комментарий "# standard library only".
 - Для Python-проектов с внешними библиотеками dependencies.items должен перечислять pip package names, например ["python-telegram-bot"].
 - Для Python-проектов test_commands должны запускать entrypoint только через ".venv/bin/python <script.py>", не через системные python/python3.
+- Если у Python-проекта есть pytest/tests, test_commands может быть ".venv/bin/python -m pytest"; если тестов нет, используй ".venv/bin/python -m py_compile <script.py>" или запуск entrypoint через .venv.
 - Если пользователь просит Go CLI/app/library, stack="go", runtime="Go 1.25+"; если go.mod нет, scaffold_required=true и expected_files должен включать go.mod.
 - Для любых Go-задач runtime всегда "Go 1.25+".
 - Если go.mod уже есть и в структуре проекта перечислены Go-файлы, scaffold_required=false; expected_files должны ссылаться на существующие Go-файлы с action="replace", если задача просит исправить/обновить скрипт.
@@ -242,9 +378,11 @@ func SpecForStep(stepKey string) Spec {
 Не пиши "создано", "изменено" или "применено" до фактического применения backend. Пиши "предлагается создать/изменить".
 Поддерживаются только action: "create" и "replace". Пути только относительные, без ../, без .git, без .zavod.
 Если Task Blueprint требует создать go.mod, используй директиву go 1.25 или выше.
+Для Go-файлов backend дополнительно запустит gofmt после применения, но content всё равно должен быть аккуратным и компилируемым.
 Если Task Blueprint stack="python", обязательно верни proposed change для requirements.txt:
 - если dependencies.items пустой или policy="standard_library_only", content должен быть "# standard library only\n";
 - если есть внешние зависимости, каждая dependency должна быть отдельной строкой, например "python-telegram-bot\n".
+Backend синхронизирует requirements.txt с dependencies.items из Task Blueprint, поэтому не добавляй зависимости в текст инструкций вместо файла.
 Для Python-кода не пиши пользователю "pip install ..."; dependency source of truth — requirements.txt.
 Если точные изменения невозможны без чтения файлов проекта, верни пустой массив [] и объясни причину в рисках.
 Формат ответа:
@@ -296,6 +434,10 @@ func SpecForStep(stepKey string) Spec {
 Твоя задача: предложить минимальный набор безопасных команд проверки после примененных изменений.
 Не утверждай, что команды уже запускались.
 Не предлагай произвольные shell-команды, установку зависимостей, сетевые команды или удаление файлов.
+Следуй Code Execution Policy V0.8.4:
+- auto: только безопасные проверки из списка ниже;
+- confirm: make, wails, go mod/go get/go run, npm install/npm ci, pip install и любые команды, меняющие зависимости или запускающие приложение;
+- deny: shell-операторы, shell-скрипты, rm/mv/cp/dd/chmod/chown, sudo, docker/kubectl/helm, сканеры и brute force инструменты.
 Выбирай команды по структуре проекта:
 - Go-команды предлагай только если в рабочем каталоге есть go.mod.
 - npm-команды предлагай только если в рабочем каталоге есть package.json.
@@ -309,9 +451,11 @@ func SpecForStep(stepKey string) Spec {
 - npm run build
 - npm run lint
 - .venv/bin/python <relative-script.py>
+- .venv/bin/python -m pytest
+- .venv/bin/python -m py_compile <relative-script.py>
 
 Если команда должна запускаться во вложенной папке проекта, укажи working_dir как относительный путь, например "frontend".
-Для Python допускается только запуск относительного .py файла без дополнительных аргументов через .venv/bin/python. Backend сам создаст .venv и установит requirements.txt перед запуском.
+Для Python допускается только .venv/bin/python. Backend сам создаст .venv и установит requirements.txt перед запуском. Не предлагай python/python3/pip напрямую.
 Если подходящей команды нет, верни пустой массив commands.
 Верни валидный JSON без markdown-блока:
 {
@@ -338,6 +482,8 @@ func SpecForStep(stepKey string) Spec {
 Отвечай на русском языке.
 Ревью — обязательный gate перед финальным ответом пользователю.
 Проверь результат работы по задаче только на основе предоставленных данных:
+- Review Gate 2.0 checklist и deterministic findings;
+- живую task spec, если она есть;
 - task brief;
 - требования;
 - task blueprint;
@@ -352,12 +498,12 @@ func SpecForStep(stepKey string) Spec {
 Не предлагай произвольные команды.
 
 Оцени:
-- соответствует ли результат задаче;
-- нет ли очевидных багов;
-- не нарушены ли ограничения;
-- прошли ли проверки;
-- достаточно ли результата для принятия.
-- соответствует ли стек, scaffold и список файлов Task Blueprint.
+- spec: соответствует ли результат цели, требованиям и acceptance criteria;
+- blueprint: соответствует ли стек, runtime, scaffold и список файлов Task Blueprint;
+- diff: нет ли лишних файлов, непримененных changes, пустых/сломанных diff, записи patch как содержимого файла;
+- tests: последние результаты проверок пройдены, старые failed не блокируют итог, если последняя попытка passed;
+- security: нет ли секретов в коде, .env, опасных команд, нарушения Code Execution Policy или scope;
+- quality: код не выглядит заглушкой, transcript/JSON/patch-мусором, чрезмерным rewrite без причины.
 
 Верни валидный JSON без markdown-блока:
 {
@@ -367,6 +513,7 @@ func SpecForStep(stepKey string) Spec {
   "blocking_reason": "",
   "findings": [
     {
+      "category": "diff",
       "severity": "major",
       "file_path": "relative/path",
       "message": "что не так",
@@ -380,13 +527,14 @@ func SpecForStep(stepKey string) Spec {
 status может быть только "accepted", "needs_work" или "blocked".
 return_to при accepted должен быть пустым.
 return_to при needs_work должен быть одним из: "product", "architect", "developer", "tester", "user".
-Используй "developer", если нужно исправить файлы или код.
-Используй "tester", если нужно только перезапустить или уточнить проверки.
-Используй "architect", если технический план или scaffold выбран неверно.
-Используй "product", если требования неполные или противоречат задаче.
-Используй "user" только если без ответа пользователя нельзя безопасно продолжать.
+Используй "developer", если нужно исправить файлы, код, безопасность кода, качество или diff.
+Используй "tester", если нужно только подобрать/перезапустить/уточнить проверки.
+Используй "architect", если Task Blueprint, технический план, runtime, scaffold или список файлов выбран неверно.
+Используй "product", если требования неполные, не позволяют проверить acceptance criteria или противоречат задаче.
+Используй "user" только если без ответа пользователя нельзя безопасно продолжать: нет CTF/security scope, нет секрета/токена/API key, конфликтуют требования пользователя или недоступна внешняя инфраструктура.
 Синтаксические ошибки, ошибки компиляции, упавшие тесты и недостающие файлы — это needs_work + return_to="developer", а не blocked.
-Используй status="blocked" только если автопилот не должен продолжать сам: нужен ответ пользователя, опасное действие, недоступна модель/инфраструктура или повторяющийся тупик. Тогда обязательно заполни blocking_reason.
+Используй status="blocked" только при настоящем пользовательском блокере. Тогда обязательно заполни blocking_reason.
+category может быть только "spec", "blueprint", "diff", "tests", "security", "quality".
 severity может быть только "critical", "major", "minor", "note".
 Если есть failed/blocked проверки или незавершенные pending/running проверки, явно отрази это в findings.
 `),
@@ -423,11 +571,103 @@ severity может быть только "critical", "major", "minor", "note".
 	}
 }
 
+func CTFSolverSpec(category string) Spec {
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "lfi":
+		return ctfRoleSpec(CTFLFIID, CTFLFIRole, CTFLFIName, "решать LFI/path traversal CTF задачи", ctfSolverPrompt("LFI", "file inclusion, path traversal, wrappers, logs, readable files"))
+	case "rce":
+		return ctfRoleSpec(CTFRCEID, CTFRCERole, CTFRCEName, "решать RCE/command injection CTF задачи", ctfSolverPrompt("RCE", "command injection, SSTI, unsafe deserialization, constrained payloads"))
+	case "sqli":
+		return ctfRoleSpec(CTFSQLiID, CTFSQLiRole, CTFSQLiName, "решать SQL injection CTF задачи", ctfSolverPrompt("SQLi", "union, blind, boolean/time-based, DB-specific behavior"))
+	case "pwn":
+		return ctfRoleSpec(CTFPwnID, CTFPwnRole, CTFPwnName, "решать локальные pwn challenge", ctfSolverPrompt("pwn", "binary triage, mitigations, offsets, ROP, local exploit plan"))
+	case "crypto":
+		return ctfRoleSpec(CTFCryptoID, CTFCryptoRole, CTFCryptoName, "решать crypto challenge", ctfSolverPrompt("crypto", "cipher identification, math weakness, known plaintext, oracle, solver script"))
+	case "reverse":
+		return ctfRoleSpec(CTFReverseID, CTFReverseRole, CTFReverseName, "решать reverse engineering challenge", ctfSolverPrompt("reverse", "strings, control flow, decompile notes, patching assumptions"))
+	case "forensics":
+		return ctfRoleSpec(CTFForensicsID, CTFForensicsRole, CTFForensicsName, "решать forensics challenge", ctfSolverPrompt("forensics", "metadata, carving, pcap, memory, stego, evidence chain"))
+	default:
+		return ctfRoleSpec(CTFWebID, CTFWebRole, CTFWebName, "решать web CTF задачи", ctfSolverPrompt("web", "HTTP, cookies, auth, parameters, SSRF/XSS style hypotheses"))
+	}
+}
+
+func ctfRoleSpec(id string, role string, name string, title string, extra string) Spec {
+	return Spec{
+		ID:          id,
+		Role:        role,
+		Name:        name,
+		MaxTokens:   1400,
+		Temperature: 0.12,
+		SystemPrompt: strings.TrimSpace(`
+Ты агент CTF Cell: ` + name + `.
+Отвечай на русском языке.
+Задача роли: ` + title + `.
+
+Safety:
+- Работай только с CTF/lab/local/provided artifacts или явно разрешенным scope.
+- Если scope отсутствует для внешней цели, не предлагай активную эксплуатацию; дай только безопасный passive plan и попроси scope.
+- Не утверждай, что запускал команды, сканеры или payload, если во входе нет результата.
+- Не давай инструкции для persistence, stealth, credential theft или destructive actions.
+- Большие логи и сырые outputs не выводи в чат; ссылайся на evidence/writeup.
+
+` + strings.TrimSpace(extra)),
+	}
+}
+
+func ctfSolverPrompt(category string, focus string) string {
+	return `
+Категория: ` + category + `.
+Фокус анализа: ` + focus + `.
+Дай практичный CTF-план: наблюдения, гипотезы, локальные проверки, solver-подход, evidence, следующий шаг.
+Для web/LFI/RCE/SQLi не отправляй payload во внешнюю цель без scope.
+Формат:
+## Наблюдения
+## Гипотеза
+## План решения
+## Evidence
+## Следующий шаг
+`
+}
+
+func researchRoleSpec(id string, role string, name string, title string, extra string) Spec {
+	return Spec{
+		ID:          id,
+		Role:        role,
+		Name:        name,
+		MaxTokens:   1400,
+		Temperature: 0.12,
+		SystemPrompt: strings.TrimSpace(`
+Ты агент Research Squad: ` + name + `.
+Отвечай на русском языке.
+Задача роли: ` + title + `.
+
+Правила Research Squad:
+- Работай только с найденными источниками и явно помечай выводы как выводы.
+- Не придумывай ссылки, даты, цены, версии, цитаты и факты.
+- Проверяй свежесть там, где данные могут устареть.
+- Для каждой важной цифры, цены, версии или утверждения должна быть ссылка на источник.
+- Ссылки пиши обычным Markdown: [название](https://example.com).
+- Сохраняй компактность: в чат идет только значимая информация, подробности уходят в research notes.
+
+` + strings.TrimSpace(extra)),
+	}
+}
+
 func RequestForSpec(model string, spec Spec, input string) llm.Request {
+	return RequestForSpecWithSoul(model, spec, "", input)
+}
+
+func RequestForSpecWithSoul(model string, spec Spec, soul string, input string) llm.Request {
+	systemPrompt := spec.SystemPrompt
+	soul = strings.TrimSpace(soul)
+	if soul != "" {
+		systemPrompt = strings.TrimSpace("## Agent soul.md\n\n" + soul + "\n\n## Step instructions\n\n" + systemPrompt)
+	}
 	return llm.Request{
 		Model: model,
 		Messages: []llm.Message{
-			{Role: "system", Content: WithDefaultSkills(spec.SystemPrompt)},
+			{Role: "system", Content: WithDefaultSkills(systemPrompt)},
 			{Role: "user", Content: strings.TrimSpace(input)},
 		},
 		Temperature: spec.Temperature,
