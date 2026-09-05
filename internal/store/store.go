@@ -2074,20 +2074,29 @@ func (s *Store) EnsureDefaultAgentGroups(ctx context.Context, defaultModelID str
 		{ID: "tool_go_dev", Name: "Go development", Kind: "go_dev", Description: "Go-проекты: gofmt, go test, go vet; go mod/make/wails только после подтверждения.", AllowedCommands: `["gofmt","go test ./...","go vet ./..."]`},
 		{ID: "tool_python_dev", Name: "Python development", Kind: "python_dev", Description: "Python-проекты только через project-local virtualenv; venv и requirements готовит backend.", AllowedCommands: `[".venv/bin/python <script.py>",".venv/bin/python -m pytest",".venv/bin/python -m py_compile"]`},
 		{ID: "tool_research", Name: "Research", Kind: "research", Description: "Поиск, чтение источников, проверка свежести, сравнение и research notes.", AllowedCommands: `[]`},
-		{ID: "tool_ctf_web", Name: "CTF web", Kind: "ctf_web", Description: "Web CTF в рамках scope: curl, локальные скрипты, evidence.", AllowedCommands: `["curl",".venv/bin/python"]`, RequiresScope: true},
-		{ID: "tool_ctf_lfi", Name: "CTF LFI", Kind: "ctf_lfi", Description: "LFI/path traversal CTF: локальные заметки, curl только в scope.", AllowedCommands: `["curl",".venv/bin/python"]`, RequiresScope: true},
-		{ID: "tool_ctf_rce", Name: "CTF RCE", Kind: "ctf_rce", Description: "RCE/command injection CTF: payload lab notes, curl только в scope.", AllowedCommands: `["curl",".venv/bin/python"]`, RequiresScope: true},
-		{ID: "tool_ctf_sqli", Name: "CTF SQLi", Kind: "ctf_sqli", Description: "SQLi CTF: локальные SQL заметки, curl/sqlmap только при явном scope.", AllowedCommands: `["curl",".venv/bin/python","sqlmap"]`, RequiresScope: true},
-		{ID: "tool_ctf_pwn", Name: "CTF pwn", Kind: "ctf_pwn", Description: "Локальный binary exploitation lab: file, strings, objdump, gdb.", AllowedCommands: `["file","strings","objdump","gdb",".venv/bin/python"]`},
-		{ID: "tool_ctf_crypto", Name: "CTF crypto", Kind: "ctf_crypto", Description: "Локальные crypto solvers через virtualenv.", AllowedCommands: `[".venv/bin/python","sage"]`},
-		{ID: "tool_ctf_reverse", Name: "CTF reverse", Kind: "ctf_reverse", Description: "Reverse engineering локальных артефактов.", AllowedCommands: `["file","strings","objdump","radare2"]`},
-		{ID: "tool_ctf_forensics", Name: "CTF forensics", Kind: "ctf_forensics", Description: "Форензика файлов и дампов.", AllowedCommands: `["file","strings","exiftool","binwalk",".venv/bin/python"]`},
+		{ID: "tool_ctf_web", Name: "CTF web", Kind: "ctf_web", Description: "Web CTF в рамках scope: локальные solver scripts auto, HTTP/DNS только после подтверждения scope.", AllowedCommands: `[".venv/bin/python <solver.py>","file","strings","curl confirm","dig confirm","whois confirm"]`, RequiresScope: true},
+		{ID: "tool_ctf_lfi", Name: "CTF LFI", Kind: "ctf_lfi", Description: "LFI/path traversal CTF: локальные solver scripts auto, HTTP-проверки только в scope.", AllowedCommands: `[".venv/bin/python <solver.py>","file","strings","curl confirm"]`, RequiresScope: true},
+		{ID: "tool_ctf_rce", Name: "CTF RCE", Kind: "ctf_rce", Description: "RCE/command injection CTF: локальный анализ auto, активные HTTP-проверки только в scope.", AllowedCommands: `[".venv/bin/python <solver.py>","file","strings","curl confirm"]`, RequiresScope: true},
+		{ID: "tool_ctf_sqli", Name: "CTF SQLi", Kind: "ctf_sqli", Description: "SQLi CTF: локальные SQL/solver scripts auto, curl/sqlmap только при явном scope.", AllowedCommands: `[".venv/bin/python <solver.py>","file","strings","curl confirm","sqlmap confirm"]`, RequiresScope: true},
+		{ID: "tool_ctf_pwn", Name: "CTF pwn", Kind: "ctf_pwn", Description: "Локальный binary exploitation lab: static triage auto, pwntools через .venv, debugger только с подтверждением.", AllowedCommands: `["file","strings","checksec","readelf","objdump","nm",".venv/bin/python <pwntools solver.py>","gdb confirm","ROPgadget confirm","one_gadget confirm"]`},
+		{ID: "tool_ctf_crypto", Name: "CTF crypto", Kind: "ctf_crypto", Description: "Локальные crypto solvers через project virtualenv; Sage только после подтверждения.", AllowedCommands: `[".venv/bin/python <solver.py>","file","strings","sage confirm"]`},
+		{ID: "tool_ctf_reverse", Name: "CTF reverse", Kind: "ctf_reverse", Description: "Reverse engineering локальных артефактов: static triage auto, interactive tools confirm.", AllowedCommands: `["file","strings","readelf","objdump","nm",".venv/bin/python <helper.py>","radare2 confirm","r2 confirm","ghidra confirm"]`},
+		{ID: "tool_ctf_forensics", Name: "CTF forensics", Kind: "ctf_forensics", Description: "Форензика файлов и дампов: metadata/binwalk без extract auto; извлечение и тяжелые tools confirm.", AllowedCommands: `["file","strings","exiftool","binwalk","xxd",".venv/bin/python <helper.py>","binwalk -e confirm","foremost confirm","tshark confirm"]`},
+		{ID: "tool_ctf_validator", Name: "CTF validator", Kind: "ctf_validator", Description: "Проверка flag, solver scripts и writeup/evidence consistency без активных сетевых действий.", AllowedCommands: `[".venv/bin/python <validator.py>","file","strings"]`},
 	}
 	for _, profile := range toolProfiles {
 		if _, err := s.db.ExecContext(ctx, `
-			INSERT OR IGNORE INTO tool_profiles
+			INSERT INTO tool_profiles
 				(id, name, kind, description, allowed_commands_json, blocked_commands_json, requires_scope, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				name = excluded.name,
+				kind = excluded.kind,
+				description = excluded.description,
+				allowed_commands_json = excluded.allowed_commands_json,
+				blocked_commands_json = excluded.blocked_commands_json,
+				requires_scope = excluded.requires_scope,
+				updated_at = excluded.updated_at
 		`, profile.ID, profile.Name, profile.Kind, profile.Description, profile.AllowedCommands, profile.BlockedCommands, boolInt(profile.RequiresScope), now, now); err != nil {
 			return err
 		}
@@ -2157,7 +2166,7 @@ func (s *Store) EnsureDefaultAgentGroups(ctx context.Context, defaultModelID str
 		{ID: "agent_ctf_crypto", Name: "Криптограф", RoleKey: "ctf_crypto", Description: "Строит solver для crypto challenge.", ToolProfileID: "tool_ctf_crypto", Temperature: 0.08, ContextBudget: 12000, Enabled: true},
 		{ID: "agent_ctf_reverse", Name: "Реверсер", RoleKey: "ctf_reverse", Description: "Анализирует reverse engineering задачи и локальные бинарные артефакты.", ToolProfileID: "tool_ctf_reverse", Temperature: 0.08, ContextBudget: 12000, Enabled: true},
 		{ID: "agent_ctf_forensics", Name: "Форензик", RoleKey: "ctf_forensics", Description: "Разбирает файлы, дампы, изображения и сетевые артефакты.", ToolProfileID: "tool_ctf_forensics", Temperature: 0.1, ContextBudget: 12000, Enabled: true},
-		{ID: "agent_ctf_validator", Name: "Валидатор", RoleKey: "validator", Description: "Проверяет flag, воспроизводимость решения и writeup.", Temperature: 0.05, ContextBudget: 9000, Enabled: true},
+		{ID: "agent_ctf_validator", Name: "Валидатор", RoleKey: "validator", Description: "Проверяет flag, воспроизводимость решения и writeup.", ToolProfileID: "tool_ctf_validator", Temperature: 0.05, ContextBudget: 9000, Enabled: true},
 	}, agentgroups.LifecycleDefinition{
 		ID:                  "lifecycle_ctf_default",
 		Name:                "CTF Challenge",

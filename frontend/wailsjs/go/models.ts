@@ -403,6 +403,8 @@ export namespace app {
 	    root: string;
 	    artifactsDir: string;
 	    evidenceDir: string;
+	    evidenceIndex: string;
+	    evidenceEvents: string;
 	    solveDir: string;
 	    writeupPath: string;
 	    challenge: CTFWorkspaceSection;
@@ -427,6 +429,8 @@ export namespace app {
 	        this.root = source["root"];
 	        this.artifactsDir = source["artifactsDir"];
 	        this.evidenceDir = source["evidenceDir"];
+	        this.evidenceIndex = source["evidenceIndex"];
+	        this.evidenceEvents = source["evidenceEvents"];
 	        this.solveDir = source["solveDir"];
 	        this.writeupPath = source["writeupPath"];
 	        this.challenge = this.convertValues(source["challenge"], CTFWorkspaceSection);

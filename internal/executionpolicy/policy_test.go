@@ -62,6 +62,55 @@ func TestCTFPolicySeparatesLocalAutoFromScopedConfirm(t *testing.T) {
 	}
 }
 
+func TestCTFToolProfilesUseCategoryAllowlists(t *testing.T) {
+	cases := []struct {
+		profile string
+		command string
+		want    string
+	}{
+		{ToolCTFWeb, ".venv/bin/python solve/check.py", DecisionAuto},
+		{ToolCTFWeb, "curl http://127.0.0.1:8080", DecisionConfirm},
+		{ToolCTFWeb, "sqlmap -u http://127.0.0.1:8080", DecisionDeny},
+		{ToolCTFSQLi, "sqlmap -u http://127.0.0.1:8080", DecisionConfirm},
+		{ToolCTFPwn, "checksec chall", DecisionAuto},
+		{ToolCTFPwn, "readelf -h chall", DecisionAuto},
+		{ToolCTFPwn, "gdb chall", DecisionConfirm},
+		{ToolCTFPwn, "binwalk firmware.bin", DecisionDeny},
+		{ToolCTFCrypto, ".venv/bin/python solve/crypto_solver.py", DecisionAuto},
+		{ToolCTFCrypto, "sage solve.sage", DecisionConfirm},
+		{ToolCTFReverse, "objdump -d chall", DecisionAuto},
+		{ToolCTFReverse, "radare2 chall", DecisionConfirm},
+		{ToolCTFForensics, "exiftool image.jpg", DecisionAuto},
+		{ToolCTFForensics, "binwalk firmware.bin", DecisionAuto},
+		{ToolCTFForensics, "binwalk -e firmware.bin", DecisionConfirm},
+	}
+	for _, tt := range cases {
+		got := EvaluateToolProfile(tt.profile, tt.command)
+		if got.Decision != tt.want {
+			t.Fatalf("EvaluateToolProfile(%q, %q) = %#v, want %s", tt.profile, tt.command, got, tt.want)
+		}
+		if got.ToolProfileID != tt.profile {
+			t.Fatalf("expected tool profile id %q, got %#v", tt.profile, got)
+		}
+	}
+}
+
+func TestCTFToolProfilesExposeAllCategories(t *testing.T) {
+	got := CTFToolProfiles()
+	if len(got) != 8 {
+		t.Fatalf("expected eight CTF tool profiles, got %#v", got)
+	}
+	seen := map[string]bool{}
+	for _, profile := range got {
+		seen[profile.Context] = len(profile.Auto) > 0 && len(profile.Deny) > 0
+	}
+	for _, profileID := range []string{ToolCTFWeb, ToolCTFLFI, ToolCTFRCE, ToolCTFSQLi, ToolCTFPwn, ToolCTFCrypto, ToolCTFReverse, ToolCTFForensics} {
+		if !seen[profileID] {
+			t.Fatalf("expected CTF profile %s, got %#v", profileID, got)
+		}
+	}
+}
+
 func TestResearchPolicyDeniesShellCommands(t *testing.T) {
 	got := Evaluate(ContextResearch, "go test ./...")
 	if got.Decision != DecisionDeny {

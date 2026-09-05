@@ -91,18 +91,24 @@ func defaultAllowedTools(roleKey, toolProfileID string) []string {
 		return []string{".venv/bin/python <script.py>", ".venv/bin/python -m pytest", ".venv/bin/python -m py_compile", "backend-managed virtualenv setup"}
 	case "tool_research":
 		return []string{"web_search", "fetch_url", "source_notes"}
-	case "tool_ctf_web", "tool_ctf_lfi", "tool_ctf_rce":
-		return []string{"curl", ".venv/bin/python", "evidence notes"}
+	case "tool_ctf_web":
+		return []string{".venv/bin/python solve/*.py", "file/strings local artifacts", "curl/dig/whois only with explicit CTF scope"}
+	case "tool_ctf_lfi":
+		return []string{".venv/bin/python solve/*.py", "file/strings local artifacts", "curl only with explicit CTF scope", "LFI payload notes in evidence"}
+	case "tool_ctf_rce":
+		return []string{".venv/bin/python solve/*.py", "file/strings local artifacts", "curl only with explicit CTF scope", "RCE payload notes in evidence"}
 	case "tool_ctf_sqli":
-		return []string{"curl", ".venv/bin/python", "sqlmap only with explicit scope"}
+		return []string{".venv/bin/python solve/*.py", "file/strings local artifacts", "curl/sqlmap only with explicit CTF scope"}
 	case "tool_ctf_pwn":
-		return []string{"file", "strings", "objdump", "gdb", ".venv/bin/python"}
+		return []string{"file", "strings", "checksec", "readelf", "objdump", "nm", ".venv/bin/python with pwntools", "gdb/ROPgadget only with confirmation"}
 	case "tool_ctf_crypto":
-		return []string{".venv/bin/python", "sage"}
+		return []string{".venv/bin/python crypto solvers", "file/strings local artifacts", "sage only with confirmation"}
 	case "tool_ctf_reverse":
-		return []string{"file", "strings", "objdump", "radare2"}
+		return []string{"file", "strings", "readelf", "objdump", "nm", ".venv/bin/python helper scripts", "radare2/r2 only with confirmation"}
 	case "tool_ctf_forensics":
-		return []string{"file", "strings", "exiftool", "binwalk", ".venv/bin/python"}
+		return []string{"file", "strings", "exiftool", "binwalk without extract", "xxd", ".venv/bin/python helpers", "binwalk extract/foremost/tshark only with confirmation"}
+	case "tool_ctf_validator":
+		return []string{".venv/bin/python validate scripts", "file/strings local artifacts", "writeup/evidence consistency checks"}
 	}
 	switch normalizedRole(roleKey) {
 	case "manager", "product", "architect", "reviewer", "researcher", "analyst", "source_reviewer", "security", "threat_modeler", "remediator":

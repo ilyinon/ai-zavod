@@ -369,6 +369,8 @@ export type CTFWorkspace = {
   root: string;
   artifactsDir: string;
   evidenceDir: string;
+  evidenceIndex: string;
+  evidenceEvents: string;
   solveDir: string;
   writeupPath: string;
   challenge: CTFWorkspaceSection;

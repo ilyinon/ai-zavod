@@ -92,6 +92,19 @@ func TestStoreSeedsAgentGroupsAndProjectBinding(t *testing.T) {
 			t.Fatalf("expected CTF profile capability contract, got %#v", profile)
 		}
 	}
+	for profileID, want := range map[string]string{
+		"tool_ctf_pwn":       "pwntools",
+		"tool_ctf_forensics": "binwalk",
+		"tool_ctf_validator": "validator.py",
+	} {
+		var allowed string
+		if err := s.db.QueryRowContext(ctx, `SELECT allowed_commands_json FROM tool_profiles WHERE id = ?`, profileID).Scan(&allowed); err != nil {
+			t.Fatalf("query tool profile %s: %v", profileID, err)
+		}
+		if !strings.Contains(allowed, want) {
+			t.Fatalf("expected tool profile %s to mention %q, got %s", profileID, want, allowed)
+		}
+	}
 	researchProfiles, err := s.ListAgentProfiles(ctx, researchGroup.ID)
 	if err != nil {
 		t.Fatalf("list research profiles: %v", err)

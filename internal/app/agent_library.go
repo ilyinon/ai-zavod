@@ -295,10 +295,10 @@ func agentLibrary() []libraryAgent {
 		{ID: "lib_ctf_lfi", Name: "LFI Hunter", RoleKey: "ctf_lfi", Category: "CTF", Description: "Решает LFI/path traversal challenge только в scope.", ToolProfileID: "tool_ctf_lfi", Tags: []string{"lfi", "path-traversal"}},
 		{ID: "lib_ctf_rce", Name: "RCE Analyst", RoleKey: "ctf_rce", Category: "CTF", Description: "Разбирает RCE/command injection challenge только в scope.", ToolProfileID: "tool_ctf_rce", Tags: []string{"rce", "command-injection"}},
 		{ID: "lib_ctf_sqli", Name: "SQLi Solver", RoleKey: "ctf_sqli", Category: "CTF", Description: "Решает SQL injection challenge и фиксирует воспроизводимые payload notes.", ToolProfileID: "tool_ctf_sqli", Tags: []string{"sqli", "database"}},
-		{ID: "lib_ctf_pwn", Name: "Pwner", RoleKey: "ctf_pwn", Category: "CTF", Description: "Разбирает локальные pwn/binary exploitation challenge.", ToolProfileID: "tool_ctf_pwn", Tags: []string{"pwn", "binary"}},
+		{ID: "lib_ctf_pwn", Name: "Pwner", RoleKey: "ctf_pwn", Category: "CTF", Description: "Разбирает локальные pwn/binary exploitation challenge: checksec/readelf/objdump и pwntools через .venv.", ToolProfileID: "tool_ctf_pwn", Tags: []string{"pwn", "binary", "pwntools"}},
 		{ID: "lib_ctf_crypto", Name: "Криптограф", RoleKey: "ctf_crypto", Category: "CTF", Description: "Строит solver для crypto challenge и проверяет восстановление flag.", ToolProfileID: "tool_ctf_crypto", Tags: []string{"crypto", "solver"}},
 		{ID: "lib_ctf_reverse", Name: "Реверсер", RoleKey: "ctf_reverse", Category: "CTF", Description: "Анализирует reverse engineering задачи и локальные бинарные артефакты.", ToolProfileID: "tool_ctf_reverse", Tags: []string{"reverse", "binary"}},
-		{ID: "lib_ctf_forensics", Name: "Форензик", RoleKey: "ctf_forensics", Category: "CTF", Description: "Разбирает файлы, дампы, изображения и сетевые артефакты.", ToolProfileID: "tool_ctf_forensics", Tags: []string{"forensics", "evidence"}},
-		{ID: "lib_ctf_validator", Name: "CTF Валидатор", RoleKey: "ctf_validator", Category: "CTF", Description: "Проверяет flag, воспроизводимость решения и writeup.", Tags: []string{"flag", "writeup"}},
+		{ID: "lib_ctf_forensics", Name: "Форензик", RoleKey: "ctf_forensics", Category: "CTF", Description: "Разбирает файлы, дампы, изображения и сетевые артефакты через file/strings/exiftool/binwalk.", ToolProfileID: "tool_ctf_forensics", Tags: []string{"forensics", "evidence", "binwalk", "exiftool"}},
+		{ID: "lib_ctf_validator", Name: "CTF Валидатор", RoleKey: "ctf_validator", Category: "CTF", Description: "Проверяет flag, воспроизводимость решения и writeup.", ToolProfileID: "tool_ctf_validator", Tags: []string{"flag", "writeup"}},
 	}
 }

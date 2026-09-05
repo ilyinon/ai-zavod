@@ -2857,6 +2857,7 @@ function CTFWorkspacePanel({ workspace }: { workspace: CTFWorkspace }) {
         </div>
         <div className="ctf-workspace-paths">
           {workspace.evidenceDir && <span>evidence: <code>{workspace.evidenceDir}</code></span>}
+          {workspace.evidenceIndex && <span>index: <code>{workspace.evidenceIndex}</code></span>}
           {workspace.solveDir && <span>solve: <code>{workspace.solveDir}</code></span>}
           {workspace.writeupPath && <span>writeup: <code>{workspace.writeupPath}</code></span>}
         </div>

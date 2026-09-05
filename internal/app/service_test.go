@@ -982,11 +982,20 @@ func TestBuildCTFWorkspaceStateAggregatesFilesAndSteps(t *testing.T) {
 	if state.Category != ctf.CategorySQLi || state.Root != workspace.RelativeRoot || state.WriteupPath != workspace.WriteupMD {
 		t.Fatalf("unexpected ctf workspace summary: %#v", state)
 	}
+	if state.EvidenceIndex != workspace.EvidenceIndex || state.Evidence.Path != workspace.EvidenceIndex {
+		t.Fatalf("expected evidence index in workspace state, got index=%q path=%q", state.EvidenceIndex, state.Evidence.Path)
+	}
 	if !strings.Contains(state.Hypotheses.Content, "injectable id") {
 		t.Fatalf("expected hypothesis step content, got %#v", state.Hypotheses)
 	}
+	if !strings.Contains(state.Evidence.Content, "Evidence Store") {
+		t.Fatalf("expected evidence index content, got %#v", state.Evidence)
+	}
 	if !hasCTFWorkspaceFileForTest(state.Files, filepath.ToSlash(filepath.Join(workspace.SolveDir, "solve.py"))) {
 		t.Fatalf("expected solver file in workspace files, got %#v", state.Files)
+	}
+	if !hasCTFWorkspaceFileForTest(state.Files, filepath.ToSlash(workspace.EvidenceEvents)) {
+		t.Fatalf("expected evidence event log in workspace files, got %#v", state.Files)
 	}
 }
 

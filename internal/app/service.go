@@ -332,23 +332,25 @@ type ReviewRunDTO = reviews.ReviewRun
 type WebSourceDTO = webresearch.Source
 
 type CTFWorkspaceDTO struct {
-	Title        string              `json:"title"`
-	Category     string              `json:"category"`
-	ScopeStatus  string              `json:"scopeStatus"`
-	Root         string              `json:"root"`
-	ArtifactsDir string              `json:"artifactsDir"`
-	EvidenceDir  string              `json:"evidenceDir"`
-	SolveDir     string              `json:"solveDir"`
-	WriteupPath  string              `json:"writeupPath"`
-	Challenge    CTFWorkspaceSection `json:"challenge"`
-	Scope        CTFWorkspaceSection `json:"scope"`
-	Artifacts    CTFWorkspaceSection `json:"artifacts"`
-	Hypotheses   CTFWorkspaceSection `json:"hypotheses"`
-	Attempts     CTFWorkspaceSection `json:"attempts"`
-	Evidence     CTFWorkspaceSection `json:"evidence"`
-	Solver       CTFWorkspaceSection `json:"solver"`
-	Writeup      CTFWorkspaceSection `json:"writeup"`
-	Files        []CTFWorkspaceFile  `json:"files"`
+	Title          string              `json:"title"`
+	Category       string              `json:"category"`
+	ScopeStatus    string              `json:"scopeStatus"`
+	Root           string              `json:"root"`
+	ArtifactsDir   string              `json:"artifactsDir"`
+	EvidenceDir    string              `json:"evidenceDir"`
+	EvidenceIndex  string              `json:"evidenceIndex"`
+	EvidenceEvents string              `json:"evidenceEvents"`
+	SolveDir       string              `json:"solveDir"`
+	WriteupPath    string              `json:"writeupPath"`
+	Challenge      CTFWorkspaceSection `json:"challenge"`
+	Scope          CTFWorkspaceSection `json:"scope"`
+	Artifacts      CTFWorkspaceSection `json:"artifacts"`
+	Hypotheses     CTFWorkspaceSection `json:"hypotheses"`
+	Attempts       CTFWorkspaceSection `json:"attempts"`
+	Evidence       CTFWorkspaceSection `json:"evidence"`
+	Solver         CTFWorkspaceSection `json:"solver"`
+	Writeup        CTFWorkspaceSection `json:"writeup"`
+	Files          []CTFWorkspaceFile  `json:"files"`
 }
 
 type CTFWorkspaceSection struct {
@@ -1405,13 +1407,14 @@ func (s *Service) runCTFWorkflow(
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFIntake, model.ID, err), nil
 	}
+	intakeEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFIntake, agents.CTFScoutID, "agent_output", "Intake", intake, nil)
 	scopeOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFScopeCheck, buildCTFScopeInput(userMessage, currentProject, workspace, intake))
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFScopeCheck, model.ID, err), nil
 	}
+	scopeEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFScopeCheck, agents.CTFScoutID, "agent_output", "Scope check", scopeOutput, nil)
 	_ = ctf.AppendNotes(currentProject.Path, workspace, map[string]string{
-		"Intake": intake,
-		"Scope":  scopeOutput,
+		"Evidence": ctfEvidenceLinks(intakeEvidence, scopeEvidence),
 	})
 
 	if workspace.RequiresScope {
@@ -1454,33 +1457,37 @@ func (s *Service) runCTFWorkflow(
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFArtifactCollection, model.ID, err), nil
 	}
+	artifactsEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFArtifactCollection, agents.CTFScoutID, "found_file", "Artifact collection", artifactsOutput, nil)
 	triageOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFTriage, buildCTFTriageInput(userMessage, currentProject, workspace, artifactsOutput))
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFTriage, model.ID, err), nil
 	}
+	triageEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFTriage, agents.CTFScoutID, "agent_output", "Triage", triageOutput, nil)
 	hypothesisOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFHypothesisBoard, buildCTFHypothesisInput(workspace, intake, scopeOutput, triageOutput))
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFHypothesisBoard, model.ID, err), nil
 	}
+	hypothesisEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFHypothesisBoard, agents.CTFScoutID, "payload_note", "Hypotheses and payload notes", hypothesisOutput, nil)
 	solverSpec := agents.CTFSolverSpec(category)
 	solverOutput, err := s.runWorkflowStepWithSpec(ctx, projectID, task.ID, run, provider, model, zw.StepCTFCategorySolver, solverSpec, buildCTFSolverInput(userMessage, currentProject, workspace, intake, scopeOutput, artifactsOutput, triageOutput, hypothesisOutput))
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFCategorySolver, model.ID, err), nil
 	}
+	solverEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFCategorySolver, solverSpec.ID, "solver_output", "Solver output", solverOutput, map[string]string{
+		"tool_profile": ctf.ToolProfileID(workspace.Category),
+	})
 	validationOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFValidation, buildCTFValidationInput(workspace, solverOutput))
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFValidation, model.ID, err), nil
 	}
+	validationEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFValidation, agents.CTFValidatorID, "validation", "Validation", validationOutput, nil)
 	writeupOutput, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepCTFWriteup, buildCTFWriteupInput(workspace, intake, scopeOutput, artifactsOutput, triageOutput, hypothesisOutput, solverOutput, validationOutput))
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepCTFWriteup, model.ID, err), nil
 	}
+	writeupEvidence := s.recordCTFEvidenceStep(currentProject.Path, workspace, zw.StepCTFWriteup, agents.ManagerID, "agent_output", "Writeup draft", writeupOutput, nil)
 	_ = ctf.AppendNotes(currentProject.Path, workspace, map[string]string{
-		"Artifacts":  artifactsOutput,
-		"Triage":     triageOutput,
-		"Hypotheses": hypothesisOutput,
-		"Solver":     solverOutput,
-		"Validation": validationOutput,
+		"Evidence": ctfEvidenceLinks(artifactsEvidence, triageEvidence, hypothesisEvidence, solverEvidence, validationEvidence, writeupEvidence),
 	})
 	_ = ctf.WriteWriteup(currentProject.Path, workspace, writeupOutput)
 
@@ -1528,6 +1535,8 @@ func (s *Service) createCTFArtifacts(ctx context.Context, currentProject project
 		{kind: "ctf_challenge", title: "CTF challenge", path: workspace.ChallengeYAML},
 		{kind: "ctf_scope", title: "CTF scope", path: workspace.ScopeMD},
 		{kind: "ctf_notes", title: "CTF notes", path: workspace.NotesMD},
+		{kind: "ctf_evidence_index", title: "CTF evidence index", path: workspace.EvidenceIndex},
+		{kind: "ctf_evidence_events", title: "CTF evidence events", path: workspace.EvidenceEvents},
 		{kind: "ctf_writeup", title: "CTF writeup", path: workspace.WriteupMD},
 	}
 	for _, item := range items {
@@ -1548,6 +1557,41 @@ func (s *Service) createCTFArtifacts(ctx context.Context, currentProject project
 	return nil
 }
 
+func (s *Service) recordCTFEvidenceStep(projectPath string, workspace ctf.Workspace, stepKey string, agentID string, kind string, title string, content string, metadata map[string]string) ctf.EvidenceEntry {
+	entry, err := ctf.RecordEvidence(projectPath, workspace, ctf.EvidenceEntry{
+		Kind:     kind,
+		Title:    title,
+		AgentID:  agentID,
+		StepKey:  stepKey,
+		Source:   "workflow_step",
+		Content:  content,
+		Metadata: metadata,
+	}, time.Now())
+	if err != nil {
+		return ctf.EvidenceEntry{}
+	}
+	return entry
+}
+
+func ctfEvidenceLinks(entries ...ctf.EvidenceEntry) string {
+	var builder strings.Builder
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.RelativePath) == "" {
+			continue
+		}
+		title := strings.TrimSpace(entry.Title)
+		if title == "" {
+			title = entry.Kind
+		}
+		builder.WriteString("- ")
+		builder.WriteString(title)
+		builder.WriteString(": `")
+		builder.WriteString(filepath.ToSlash(entry.RelativePath))
+		builder.WriteString("`\n")
+	}
+	return strings.TrimSpace(builder.String())
+}
+
 func (s *Service) buildCTFWorkspaceState(currentProject project.Project, task *chat.Task, run *zw.Run, steps []zw.Step, artifactItems []artifacts.Artifact) *CTFWorkspaceDTO {
 	if task == nil || run == nil {
 		return nil
@@ -1565,23 +1609,25 @@ func (s *Service) buildCTFWorkspaceState(currentProject project.Project, task *c
 	files := ctfWorkspaceFiles(currentProject, root, artifactItems)
 
 	return &CTFWorkspaceDTO{
-		Title:        task.Title,
-		Category:     category,
-		ScopeStatus:  scopeStatus,
-		Root:         root,
-		ArtifactsDir: ctfPathJoin(root, "artifacts"),
-		EvidenceDir:  ctfPathJoin(root, "evidence"),
-		SolveDir:     ctfPathJoin(root, "solve"),
-		WriteupPath:  ctfPathJoin(root, "writeup.md"),
-		Challenge:    ctfFileSection(currentProject, ctfPathJoin(root, "challenge.yml"), "Challenge", "ctf_challenge"),
-		Scope:        ctfSectionFromFileOrStep(currentProject, ctfPathJoin(root, "scope.md"), "Scope", stepByKey[zw.StepCTFScopeCheck]),
-		Artifacts:    ctfSectionFromStep("Артефакты", stepByKey[zw.StepCTFArtifactCollection]),
-		Hypotheses:   ctfSectionFromStep("Гипотезы", stepByKey[zw.StepCTFHypothesisBoard]),
-		Attempts:     ctfAttemptsSection(currentProject, root, stepByKey),
-		Evidence:     ctfEvidenceSection(currentProject, root, stepByKey, files),
-		Solver:       ctfSolverSection(currentProject, root, stepByKey[zw.StepCTFCategorySolver]),
-		Writeup:      ctfSectionFromFileOrStep(currentProject, ctfPathJoin(root, "writeup.md"), "Writeup", stepByKey[zw.StepCTFWriteup]),
-		Files:        files,
+		Title:          task.Title,
+		Category:       category,
+		ScopeStatus:    scopeStatus,
+		Root:           root,
+		ArtifactsDir:   ctfPathJoin(root, "artifacts"),
+		EvidenceDir:    ctfPathJoin(root, "evidence"),
+		EvidenceIndex:  ctfPathJoin(root, "evidence", "index.md"),
+		EvidenceEvents: ctfPathJoin(root, "evidence", "events.jsonl"),
+		SolveDir:       ctfPathJoin(root, "solve"),
+		WriteupPath:    ctfPathJoin(root, "writeup.md"),
+		Challenge:      ctfFileSection(currentProject, ctfPathJoin(root, "challenge.yml"), "Challenge", "ctf_challenge"),
+		Scope:          ctfSectionFromFileOrStep(currentProject, ctfPathJoin(root, "scope.md"), "Scope", stepByKey[zw.StepCTFScopeCheck]),
+		Artifacts:      ctfSectionFromStep("Артефакты", stepByKey[zw.StepCTFArtifactCollection]),
+		Hypotheses:     ctfSectionFromStep("Гипотезы", stepByKey[zw.StepCTFHypothesisBoard]),
+		Attempts:       ctfAttemptsSection(currentProject, root, stepByKey),
+		Evidence:       ctfEvidenceSection(currentProject, root, stepByKey, files),
+		Solver:         ctfSolverSection(currentProject, root, stepByKey[zw.StepCTFCategorySolver]),
+		Writeup:        ctfSectionFromFileOrStep(currentProject, ctfPathJoin(root, "writeup.md"), "Writeup", stepByKey[zw.StepCTFWriteup]),
+		Files:          files,
 	}
 }
 
@@ -1704,7 +1750,11 @@ func ctfAttemptsSection(currentProject project.Project, root string, steps map[s
 }
 
 func ctfEvidenceSection(currentProject project.Project, root string, steps map[string]zw.Step, files []CTFWorkspaceFile) CTFWorkspaceSection {
-	content := extractMarkdownSection(readProjectRelativeFile(currentProject, ctfPathJoin(root, "notes.md")), "Evidence")
+	evidenceIndex := ctfPathJoin(root, "evidence", "index.md")
+	content := readProjectRelativeFile(currentProject, evidenceIndex)
+	if strings.TrimSpace(content) == "" {
+		content = extractMarkdownSection(readProjectRelativeFile(currentProject, ctfPathJoin(root, "notes.md")), "Evidence")
+	}
 	if strings.TrimSpace(content) == "" {
 		content = steps[zw.StepCTFArtifactCollection].Output
 	}
@@ -1726,7 +1776,7 @@ func ctfEvidenceSection(currentProject project.Project, root string, steps map[s
 		Title:   "Evidence",
 		Status:  ctfSectionStatus(steps[zw.StepCTFArtifactCollection]),
 		Content: shortenForPrompt(content, 1800),
-		Path:    ctfPathJoin(root, "evidence"),
+		Path:    evidenceIndex,
 		AgentID: steps[zw.StepCTFArtifactCollection].AgentID,
 	}
 }
@@ -4488,6 +4538,9 @@ func buildCTFScopeInput(userMessage string, project project.Project, workspace c
 # Workspace
 ` + ctfWorkspacePrompt(project, workspace) + `
 
+# Tool profile
+` + ctf.ToolProfileID(workspace.Category) + `
+
 # Intake
 ` + intake + `
 
@@ -4628,6 +4681,9 @@ func ctfWorkspacePrompt(project project.Project, workspace ctf.Workspace) string
 	builder.WriteString(fmt.Sprintf("- challenge: %s\n", workspace.ChallengeYAML))
 	builder.WriteString(fmt.Sprintf("- scope: %s\n", workspace.ScopeMD))
 	builder.WriteString(fmt.Sprintf("- notes: %s\n", workspace.NotesMD))
+	builder.WriteString(fmt.Sprintf("- evidence_dir: %s\n", workspace.EvidenceDir))
+	builder.WriteString(fmt.Sprintf("- evidence_index: %s\n", workspace.EvidenceIndex))
+	builder.WriteString(fmt.Sprintf("- evidence_events: %s\n", workspace.EvidenceEvents))
 	builder.WriteString(fmt.Sprintf("- solve_dir: %s\n", workspace.SolveDir))
 	builder.WriteString(fmt.Sprintf("- writeup: %s\n", workspace.WriteupMD))
 	if len(workspace.AllowedActions) > 0 {
@@ -4649,10 +4705,11 @@ func ctfScopeRequiredAnswer(workspace ctf.Workspace) string {
 
 func ctfDoneAnswer(workspace ctf.Workspace, solverName string) string {
 	return strings.TrimSpace(fmt.Sprintf(
-		"## CTF workspace готов\n\nКатегория: `%s`\nSolver: %s\nWorkspace: `%s`\nWriteup: `%s`",
+		"## CTF workspace готов\n\nКатегория: `%s`\nSolver: %s\nWorkspace: `%s`\nEvidence: `%s`\nWriteup: `%s`",
 		workspace.Category,
 		solverName,
 		workspace.RelativeRoot,
+		workspace.EvidenceIndex,
 		workspace.WriteupMD,
 	))
 }

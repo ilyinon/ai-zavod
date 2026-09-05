@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"zavod_ai/internal/executionpolicy"
 )
 
 func TestValidateCommandAllowsExpectedCommands(t *testing.T) {
@@ -97,6 +99,37 @@ func TestValidateCommandBlocksUnsupportedProjectCommands(t *testing.T) {
 	for _, command := range cases {
 		if err := ValidateCommand(projectPath, command, ""); err == nil {
 			t.Fatalf("expected %q to be blocked for unsupported project", command)
+		}
+	}
+}
+
+func TestValidateCommandWithCTFToolProfile(t *testing.T) {
+	projectPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectPath, "chall"), []byte("ELF-ish"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "firmware.bin"), []byte("blob"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		profile string
+		command string
+		wantErr bool
+	}{
+		{profile: executionpolicy.ToolCTFPwn, command: "checksec chall"},
+		{profile: executionpolicy.ToolCTFPwn, command: "binwalk firmware.bin", wantErr: true},
+		{profile: executionpolicy.ToolCTFForensics, command: "binwalk firmware.bin"},
+		{profile: executionpolicy.ToolCTFForensics, command: "binwalk -e firmware.bin", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		err := ValidateCommandWithToolProfile(projectPath, tc.profile, tc.command, "")
+		if tc.wantErr && err == nil {
+			t.Fatalf("expected %s / %q to be blocked", tc.profile, tc.command)
+		}
+		if !tc.wantErr && err != nil {
+			t.Fatalf("expected %s / %q to be allowed: %v", tc.profile, tc.command, err)
 		}
 	}
 }

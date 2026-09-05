@@ -119,6 +119,76 @@ Acceptance criteria:
 - файлы CTF workspace отображаются без служебных `.zavod` артефактов;
 - длинный markdown в секциях скроллится внутри карточки и не ломает layout.
 
+## V0.9.4 - CTF Tool Profiles
+
+CTF-агенты используют разные allowlist-инструменты по категориям challenge. Tool profile выбирается по категории workspace и передается агенту как часть контекста, чтобы `web`, `LFI`, `RCE`, `SQLi`, `pwn`, `crypto`, `reverse` и `forensics` не работали одним общим набором команд.
+
+Backend:
+
+- `ctf.ToolProfileID(category)` возвращает profile id для текущей CTF-категории;
+- `executionpolicy.EvaluateToolProfile(profileID, command)` проверяет команду по конкретному tool profile;
+- `checks.ValidateCommandWithToolProfile` и `checks.RunWithToolProfile` дают runner-путь для CTF-команд с теми же правилами;
+- `tool_profiles` seed обновляется через upsert, чтобы существующие локальные БД получали новые allowlist;
+- CTF solver input содержит текущий tool profile;
+- CTF Validator использует отдельный `tool_ctf_validator`.
+
+Профили:
+
+- `tool_ctf_web`, `tool_ctf_lfi`, `tool_ctf_rce`: `.venv` solver scripts и локальный `file/strings` автоматически, HTTP/network действия только при явном CTF scope и подтверждении;
+- `tool_ctf_sqli`: `.venv` solver scripts и локальный анализ автоматически, `curl/sqlmap` только с подтверждением и scope;
+- `tool_ctf_pwn`: `file`, `strings`, `checksec`, `readelf`, `objdump`, `nm` автоматически; `pwntools` только через project `.venv`; `gdb/ROPgadget/one_gadget` с подтверждением;
+- `tool_ctf_crypto`: solver scripts через `.venv` автоматически, `sage` с подтверждением;
+- `tool_ctf_reverse`: static triage (`file/strings/readelf/objdump/nm`) автоматически, `radare2/r2/ghidra` с подтверждением;
+- `tool_ctf_forensics`: `file`, `strings`, `exiftool`, `binwalk` без extract, `xxd` автоматически; `binwalk -e`, `foremost`, `tshark` с подтверждением.
+
+Acceptance criteria:
+
+- каждая CTF-категория имеет собственный profile id и человекочитаемый allowlist;
+- pwn-профиль содержит `pwntools` через `.venv`, но не разрешает forensic tools автоматически;
+- forensics-профиль содержит `binwalk/exiftool`, но extract-операции требуют подтверждения;
+- solver scripts запускаются только через project `.venv`;
+- shell-операторы, destructive-команды и активные security tools вне scope запрещены.
+
+## V0.9.5 - CTF Evidence Store
+
+CTF workflow хранит доказательства отдельно от чата. Чат остается кратким: статус, выводы и ссылки на workspace-файлы. Сырые outputs, найденные файлы, payload notes, screenshots, pcap-разборы и solver outputs живут в `ctf/<challenge>/evidence/`.
+
+Файловая структура:
+
+- `evidence/index.md` - человекочитаемый индекс evidence entries;
+- `evidence/events.jsonl` - машинный append-only журнал evidence entries;
+- `evidence/<timestamp>-<step>-<kind>-<title>.md` - отдельная запись с metadata, summary и полным content;
+- `solve/` остается местом для solver scripts, но outputs solver записываются в evidence.
+
+Backend:
+
+- `ctf.EvidenceEntry` описывает тип, источник, step, агента, summary, content, metadata и relative path;
+- `ctf.RecordEvidence` безопасно пишет markdown entry, обновляет `index.md` и дописывает `events.jsonl`;
+- `PrepareWorkspace` создает `evidence/index.md` и `evidence/events.jsonl` сразу при создании CTF workspace;
+- CTF workflow сохраняет outputs ключевых шагов как evidence entries;
+- `CTFWorkspaceDTO` содержит `evidenceIndex` и `evidenceEvents`;
+- UI-секция Evidence строится из `evidence/index.md`, а не из сырого workflow dump.
+
+Типы evidence:
+
+- `command_output`;
+- `found_file`;
+- `payload_note`;
+- `screenshot`;
+- `pcap_analysis`;
+- `solver_output`;
+- `validation`;
+- `agent_output`;
+- `note`.
+
+Acceptance criteria:
+
+- новая CTF-задача сразу получает evidence store;
+- outputs CTF workflow не обязаны попадать в чат целиком и доступны через evidence files;
+- `evidence/index.md` содержит ссылки на отдельные записи;
+- `events.jsonl` можно использовать для будущего UI/экспорта;
+- пути evidence не могут выйти за пределы project workspace.
+
 ## Цель
 
 Локальное macOS desktop-приложение для управления AI-агентами через чат. Пользователь выбирает проект, пишет задачу, а входной агент "Люмен" принимает ее и отвечает через выбранную модель.

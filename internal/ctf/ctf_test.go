@@ -3,6 +3,7 @@ package ctf
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,6 +49,24 @@ func TestScopeStatusAllowsExplicitCTF(t *testing.T) {
 	}
 }
 
+func TestToolProfileIDByCategory(t *testing.T) {
+	tests := map[string]string{
+		CategoryWeb:       "tool_ctf_web",
+		CategoryLFI:       "tool_ctf_lfi",
+		CategoryRCE:       "tool_ctf_rce",
+		CategorySQLi:      "tool_ctf_sqli",
+		CategoryPwn:       "tool_ctf_pwn",
+		CategoryCrypto:    "tool_ctf_crypto",
+		CategoryReverse:   "tool_ctf_reverse",
+		CategoryForensics: "tool_ctf_forensics",
+	}
+	for category, want := range tests {
+		if got := ToolProfileID(category); got != want {
+			t.Fatalf("ToolProfileID(%q) = %q, want %q", category, got, want)
+		}
+	}
+}
+
 func TestPrepareWorkspaceCreatesCTFFiles(t *testing.T) {
 	root := t.TempDir()
 	workspace, err := PrepareWorkspace(root, "Baby SQLi", "solve SQLi CTF", CategorySQLi, time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC))
@@ -61,11 +80,60 @@ func TestPrepareWorkspaceCreatesCTFFiles(t *testing.T) {
 		workspace.ChallengeYAML,
 		workspace.ScopeMD,
 		workspace.NotesMD,
+		workspace.EvidenceIndex,
+		workspace.EvidenceEvents,
 		filepath.Join(workspace.SolveDir, "README.md"),
 		workspace.WriteupMD,
 	} {
 		if _, err := os.Stat(filepath.Join(root, relativePath)); err != nil {
 			t.Fatalf("expected %s: %v", relativePath, err)
 		}
+	}
+}
+
+func TestRecordEvidenceWritesEntryIndexAndJSONL(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 9, 5, 12, 34, 56, 0, time.UTC)
+	workspace, err := PrepareWorkspace(root, "Baby pwn", "solve pwn CTF", CategoryPwn, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry, err := RecordEvidence(root, workspace, EvidenceEntry{
+		Kind:    "solver_output",
+		Title:   "Pwntools solver result",
+		AgentID: "ctf_pwn",
+		StepKey: "category_solver",
+		Content: "flag{demo}\n",
+		Metadata: map[string]string{
+			"tool_profile": "tool_ctf_pwn",
+		},
+	}, now)
+	if err != nil {
+		t.Fatalf("record evidence: %v", err)
+	}
+	if entry.RelativePath == "" || !strings.HasPrefix(entry.RelativePath, filepath.ToSlash(workspace.EvidenceDir)+"/") {
+		t.Fatalf("unexpected evidence path: %#v", entry)
+	}
+	content, err := os.ReadFile(filepath.Join(root, entry.RelativePath))
+	if err != nil {
+		t.Fatalf("read evidence entry: %v", err)
+	}
+	if !strings.Contains(string(content), "flag{demo}") || !strings.Contains(string(content), "tool_ctf_pwn") {
+		t.Fatalf("expected evidence content and metadata, got %s", string(content))
+	}
+	index, err := os.ReadFile(filepath.Join(root, workspace.EvidenceIndex))
+	if err != nil {
+		t.Fatalf("read evidence index: %v", err)
+	}
+	if !strings.Contains(string(index), "Pwntools solver result") || !strings.Contains(string(index), filepath.Base(entry.RelativePath)) {
+		t.Fatalf("expected index link, got %s", string(index))
+	}
+	events, err := os.ReadFile(filepath.Join(root, workspace.EvidenceEvents))
+	if err != nil {
+		t.Fatalf("read evidence events: %v", err)
+	}
+	if !strings.Contains(string(events), `"kind":"solver_output"`) || !strings.Contains(string(events), `"relativePath"`) {
+		t.Fatalf("expected jsonl event, got %s", string(events))
 	}
 }

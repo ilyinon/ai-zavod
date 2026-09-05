@@ -609,7 +609,9 @@ Safety:
 - Если scope отсутствует для внешней цели, не предлагай активную эксплуатацию; дай только безопасный passive plan и попроси scope.
 - Не утверждай, что запускал команды, сканеры или payload, если во входе нет результата.
 - Не давай инструкции для persistence, stealth, credential theft или destructive actions.
-- Большие логи и сырые outputs не выводи в чат; ссылайся на evidence/writeup.
+- Большие логи, сырые outputs, payload notes, screenshots, pcap-разборы и solver outputs не выводи в чат; сохраняй и цитируй через CTF Evidence Store.
+- Команды предлагай только из category tool profile текущего агента.
+- Solver scripts запускаются только через project .venv.
 
 ` + strings.TrimSpace(extra)),
 	}

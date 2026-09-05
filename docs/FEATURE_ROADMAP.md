@@ -255,6 +255,63 @@ CTF-задача должна иметь отдельный рабочий эк�
 - Длинные секции не ломают высоту чата.
 - UI остается читаемым на узком окне.
 
+## V0.9.4 - CTF Tool Profiles
+
+### Цель
+
+CTF Cell должен выбирать инструменты по категории задачи, а не работать одним общим security allowlist.
+
+### Фичи
+
+- Tool profile на каждую категорию: `web`, `LFI`, `RCE`, `SQLi`, `pwn`, `crypto`, `reverse`, `forensics`.
+- Маппинг `ctf.ToolProfileID(category)`.
+- Проверка команд через `executionpolicy.EvaluateToolProfile(profileID, command)`.
+- Runner/checker API: `checks.ValidateCommandWithToolProfile` и `checks.RunWithToolProfile`.
+- Seed/upsert `tool_profiles` для новых и существующих локальных БД.
+- Solver scripts запускаются только через project `.venv`.
+- Примеры профилей:
+  - `pwn`: `pwntools` через `.venv`, `checksec/readelf/objdump/nm`, debugger с подтверждением;
+  - `forensics`: `binwalk/exiftool/xxd`, extract/tshark с подтверждением;
+  - `SQLi`: `sqlmap` только с явным scope и подтверждением.
+
+### Acceptance Criteria
+
+- У каждой CTF-категории свой allowlist и свой profile id.
+- Лишние инструменты не протекают между категориями.
+- Активные сетевые проверки требуют explicit CTF scope.
+- Старые проекты получают обновленные profiles при запуске seed.
+
+## V0.9.5 - CTF Evidence Store
+
+### Цель
+
+Отделить доказательства и сырые outputs CTF-работы от чата. Чат должен показывать только значимую выжимку и ссылки на evidence/writeup.
+
+### Фичи
+
+- `ctf/<challenge>/evidence/index.md` как человекочитаемый индекс.
+- `ctf/<challenge>/evidence/events.jsonl` как машинный журнал.
+- Отдельные markdown-записи для:
+  - command outputs;
+  - found files;
+  - payload notes;
+  - screenshots;
+  - pcap analysis;
+  - solver outputs;
+  - validation evidence.
+- `ctf.RecordEvidence` для безопасной записи evidence внутри project workspace.
+- CTF workflow автоматически пишет outputs шагов в evidence store.
+- `CTFWorkspaceDTO.evidenceIndex/evidenceEvents`.
+- UI Evidence читает `evidence/index.md`.
+
+### Acceptance Criteria
+
+- Новая CTF-задача сразу содержит `evidence/index.md` и `evidence/events.jsonl`.
+- Solver output хранится отдельной evidence-записью.
+- Чат не обязан содержать raw outputs целиком.
+- JSONL не отображается как текст сообщения.
+- Evidence paths защищены от path traversal.
+
 ## V0.7.0 - Task Memory & Spec Store
 
 ### Цель

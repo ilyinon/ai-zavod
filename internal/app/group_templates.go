@@ -274,7 +274,7 @@ func ctfGroupTemplate() groupTemplate {
 			{Key: "crypto", Name: "Криптограф", RoleKey: "ctf_crypto", Description: "Строит solver для crypto challenge.", ToolProfileID: "tool_ctf_crypto", Temperature: 0.08, ContextBudget: 12000, Enabled: true},
 			{Key: "reverse", Name: "Реверсер", RoleKey: "ctf_reverse", Description: "Анализирует reverse engineering задачи.", ToolProfileID: "tool_ctf_reverse", Temperature: 0.08, ContextBudget: 12000, Enabled: true},
 			{Key: "forensics", Name: "Форензик", RoleKey: "ctf_forensics", Description: "Разбирает файлы, дампы, изображения и сетевые артефакты.", ToolProfileID: "tool_ctf_forensics", Temperature: 0.1, ContextBudget: 12000, Enabled: true},
-			{Key: "validator", Name: "Валидатор", RoleKey: "ctf_validator", Description: "Проверяет flag, воспроизводимость решения и writeup.", Temperature: 0.05, ContextBudget: 9000, Enabled: true},
+			{Key: "validator", Name: "Валидатор", RoleKey: "ctf_validator", Description: "Проверяет flag, воспроизводимость решения и writeup.", ToolProfileID: "tool_ctf_validator", Temperature: 0.05, ContextBudget: 9000, Enabled: true},
 		},
 		Steps: []templateStep{
 			{StepKey: "intake", Title: "Постановка CTF", ProfileKey: "lumen", Mode: "llm", Required: true, CanRetry: true, MaxRetries: 1, VisibleToUser: true},

@@ -120,6 +120,16 @@ func FilterSupportedSuggestions(projectPath string, suggestions []Suggestion) []
 	return filtered
 }
 
+func FilterSupportedSuggestionsWithToolProfile(projectPath string, toolProfileID string, suggestions []Suggestion) []Suggestion {
+	filtered := make([]Suggestion, 0, len(suggestions))
+	for _, suggestion := range normalizeSuggestions(suggestions) {
+		if ValidateCommandWithToolProfile(projectPath, toolProfileID, suggestion.Command, suggestion.WorkingDir) == nil {
+			filtered = append(filtered, suggestion)
+		}
+	}
+	return filtered
+}
+
 func ValidateCommand(projectPath string, command string, workingDir string) error {
 	if _, _, err := Resolve(projectPath, command, workingDir); err != nil {
 		return err
@@ -127,8 +137,26 @@ func ValidateCommand(projectPath string, command string, workingDir string) erro
 	return nil
 }
 
+func ValidateCommandWithToolProfile(projectPath string, toolProfileID string, command string, workingDir string) error {
+	if _, _, err := ResolveWithToolProfile(projectPath, toolProfileID, command, workingDir); err != nil {
+		return err
+	}
+	return nil
+}
+
 func Run(ctx context.Context, projectPath string, command string, workingDir string) RunResult {
-	workDir, args, err := Resolve(projectPath, command, workingDir)
+	return runResolved(ctx, projectPath, command, workingDir, Resolve)
+}
+
+func RunWithToolProfile(ctx context.Context, projectPath string, toolProfileID string, command string, workingDir string) RunResult {
+	resolver := func(projectPath string, command string, workingDir string) (string, []string, error) {
+		return ResolveWithToolProfile(projectPath, toolProfileID, command, workingDir)
+	}
+	return runResolved(ctx, projectPath, command, workingDir, resolver)
+}
+
+func runResolved(ctx context.Context, projectPath string, command string, workingDir string, resolver func(string, string, string) (string, []string, error)) RunResult {
+	workDir, args, err := resolver(projectPath, command, workingDir)
 	if err != nil {
 		return RunResult{Status: StatusBlocked, ExitCode: -1, Error: err.Error()}
 	}
@@ -244,6 +272,18 @@ func runPrepCommand(cmd *exec.Cmd) (string, string, error) {
 }
 
 func Resolve(projectPath string, command string, workingDir string) (string, []string, error) {
+	return resolveWithPolicy(projectPath, command, workingDir, func(normalized string) executionpolicy.Evaluation {
+		return executionpolicy.Evaluate(executionpolicy.ContextDev, normalized)
+	})
+}
+
+func ResolveWithToolProfile(projectPath string, toolProfileID string, command string, workingDir string) (string, []string, error) {
+	return resolveWithPolicy(projectPath, command, workingDir, func(normalized string) executionpolicy.Evaluation {
+		return executionpolicy.EvaluateToolProfile(toolProfileID, normalized)
+	})
+}
+
+func resolveWithPolicy(projectPath string, command string, workingDir string, evaluate func(string) executionpolicy.Evaluation) (string, []string, error) {
 	projectRoot, err := filepath.Abs(projectPath)
 	if err != nil {
 		return "", nil, err
@@ -259,7 +299,7 @@ func Resolve(projectPath string, command string, workingDir string) (string, []s
 	if len(args) == 0 {
 		return "", nil, fmt.Errorf("команда пустая")
 	}
-	evaluation := executionpolicy.Evaluate(executionpolicy.ContextDev, strings.Join(args, " "))
+	evaluation := evaluate(strings.Join(args, " "))
 	if evaluation.Decision != executionpolicy.DecisionAuto {
 		return "", nil, fmt.Errorf("команда заблокирована policy: %s", evaluation.Reason)
 	}
