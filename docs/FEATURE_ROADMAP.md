@@ -832,6 +832,20 @@ CTF Cell должен выбирать инструменты по катего�
 - Добавлен seed `Security Audit`, чтобы defensive security имел штатную команду, а не падал в Dev Squad.
 - Project Memory пока учитывается как routing-сигнал; полное содержимое не отправляется в prompt без отдельной политики безопасной фильтрации.
 
+### V1.0.5 - Universal Lifecycle Runtime
+
+- Один runtime должен исполнять любой `LifecycleDefinition`, выбранный Люмен.
+- Dev, Research, CTF и Security больше не должны жить отдельными hardcoded workflow-функциями.
+- `LifecycleStep.mode` определяет handler: `llm`, `tool`, `checks`, `review`, `artifact`, `human_gate`, `final`.
+- Runtime должен поддержать retries, `onSuccessStepKey`, `onFailureStepKey`, conditions, branches, parallel abstraction, join и completion rules.
+- `human_gate` переводит workflow в `waiting_user`, сохраняет вопросы и умеет продолжить после accepted answers.
+- Специализированная логика research/CTF/security/dev переносится в step handlers.
+- UI progress/popover должен показывать фактический runtime graph: текущий шаг, возвраты, retries, skipped/parallel/join.
+- Главный критерий: кастомная группа с кастомным lifecycle должна реально исполняться без добавления нового Go-кода под конкретный пайп.
+- Baseline реализован в `internal/lifecycleruntime`: ordered execution, retries, return/jump, forced rerun, human gate stop, parallel abstraction и join.
+- App service подключен к Runner для dev/custom lifecycle и умеет resume существующего `waiting_user` run.
+- Research/CTF/Security пока оставлены как compatibility wrappers до переноса внутренних действий в отдельные `StepHandler`.
+
 ## References
 
 - OpenAI Agents SDK описывает агентов как модель с instructions, tools, handoffs, guardrails и structured outputs: https://openai.github.io/openai-agents-python/agents/

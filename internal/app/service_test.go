@@ -927,7 +927,7 @@ func TestRunV03RuntimeLifecycleFollowsBranchAndReturn(t *testing.T) {
 	calls := []string{}
 	reviewCalls := 0
 	result := v03WorkflowResult{}
-	err := (&Service{}).runV03RuntimeLifecycle(&result, func(stepKey string, force bool) (string, error) {
+	err := (&Service{}).runV03RuntimeLifecycle(context.Background(), &zw.Run{}, &result, func(stepKey string, force bool) (string, error) {
 		calls = append(calls, stepKey)
 		if stepKey == zw.StepReview {
 			reviewCalls++

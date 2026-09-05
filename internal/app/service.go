@@ -26,6 +26,7 @@ import (
 	"zavod_ai/internal/ctf"
 	"zavod_ai/internal/devworkspace"
 	lifecycler "zavod_ai/internal/lifecycle"
+	"zavod_ai/internal/lifecycleruntime"
 	"zavod_ai/internal/llm"
 	"zavod_ai/internal/orchestration"
 	"zavod_ai/internal/project"
@@ -700,9 +701,20 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	}
 	useCTFWorkflow := decision.Intent == router.IntentPentestTask && s.shouldUseCTFWorkflow(ctx, input.ProjectID, content)
 
-	run, err := s.store.CreateWorkflowRun(ctx, task.ID)
-	if err != nil {
-		return ChatState{}, err
+	resumingRun := decision.Intent == router.IntentClarificationAnswer && latestRun != nil && latestRun.Status == zw.StatusWaitingUser
+	var run zw.Run
+	if resumingRun {
+		run = *latestRun
+		run.Status = zw.StatusRunning
+		if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusRunning, run.CurrentStep, ""); err != nil {
+			return ChatState{}, err
+		}
+	} else {
+		createdRun, err := s.store.CreateWorkflowRun(ctx, task.ID)
+		if err != nil {
+			return ChatState{}, err
+		}
+		run = createdRun
 	}
 	if decision.Intent == router.IntentClarificationAnswer {
 		_ = s.patchTaskSpec(ctx, taskspec.Spec{
@@ -716,7 +728,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		_ = s.resetTaskSpecForWorkflow(ctx, currentProject, *task, run.ID, content)
 	}
 	s.emitWorkflowRun(run)
-	_ = s.createDynamicWorkflowPlan(ctx, currentProject, *task, run.ID, provider, model, content, decision.Intent)
+	if !resumingRun {
+		_ = s.createDynamicWorkflowPlan(ctx, currentProject, *task, run.ID, provider, model, content, decision.Intent)
+	}
 
 	history, err := s.store.ListMessages(ctx, task.ID)
 	if err != nil {
@@ -3588,6 +3602,11 @@ func (s *Service) runV03Workflow(
 ) (v03WorkflowResult, error) {
 	projectID := project.ID
 	result := v03WorkflowResult{}
+	if run != nil {
+		if savedBlueprint, err := s.store.LatestTaskBlueprint(ctx, run.ID); err == nil && savedBlueprint != nil {
+			result.Blueprint = *savedBlueprint
+		}
+	}
 
 	executed := map[string]bool{}
 	outputs := map[string]string{}
@@ -3708,7 +3727,7 @@ func (s *Service) runV03Workflow(
 	}
 
 	if executor, ok := s.lifecycleExecutor(ctx, projectID); ok {
-		if err := s.runV03RuntimeLifecycle(&result, runStep, executor); err != nil {
+		if err := s.runV03RuntimeLifecycle(ctx, run, &result, runStep, executor); err != nil {
 			return result, err
 		}
 		return result, nil
@@ -3727,93 +3746,117 @@ func (s *Service) runV03Workflow(
 }
 
 func (s *Service) runV03RuntimeLifecycle(
+	ctx context.Context,
+	run *zw.Run,
 	result *v03WorkflowResult,
 	runStep func(stepKey string, force bool) (string, error),
 	executor lifecycler.Executor,
 ) error {
+	handler := func(ctx context.Context, step lifecycleruntime.StepContext) lifecycleruntime.StepResult {
+		force := step.Retry || step.Force
+		output, err := runStep(step.Step.StepKey, force)
+		if result.NeedsClarification {
+			return lifecycleruntime.StepResult{
+				Status:    zw.StatusWaitingUser,
+				Output:    output,
+				Error:     firstNonEmpty(result.Clarification, "step waits for user input"),
+				WaitHuman: true,
+			}
+		}
+		return lifecycleRuntimeStepResult(output, err)
+	}
+	runner := lifecycleruntime.NewRunner(executor, map[string]lifecycleruntime.StepHandler{
+		lifecycler.ModeLLM:      handler,
+		lifecycler.ModeTool:     handler,
+		lifecycler.ModeChecks:   handler,
+		lifecycler.ModeReview:   handler,
+		lifecycler.ModeArtifact: handler,
+		lifecycler.ModeFinal:    handler,
+		lifecycler.ModeJoin: func(ctx context.Context, step lifecycleruntime.StepContext) lifecycleruntime.StepResult {
+			return lifecycleruntime.StepResult{Status: zw.StepStatusDone, Output: "join complete"}
+		},
+	}, handler)
+	runtimeResult, err := runner.Run(ctx, s.lifecycleRuntimeState(ctx, run, result))
+	if runtimeResult.Status == zw.StatusWaitingUser {
+		result.NeedsClarification = true
+		result.ClarificationStep = runtimeResult.CurrentStepKey
+		result.Clarification = runtimeResult.Reason
+		return nil
+	}
+	if runtimeResult.Status == zw.StatusBlocked {
+		return errors.New(firstNonEmpty(runtimeResult.Reason, "lifecycle runtime blocked"))
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) lifecycleRuntimeState(ctx context.Context, run *zw.Run, result *v03WorkflowResult) lifecycler.RuntimeState {
 	state := lifecycler.RuntimeState{
 		Results:    map[string]lifecycler.StepResult{},
 		Attempts:   map[string]int{},
 		Variables:  map[string]string{},
 		HumanGates: map[string]bool{},
 	}
-	forceNextRun := map[string]bool{}
-	maxTurns := executor.Definition().MaxTotalIterations
-	if maxTurns <= 0 {
-		maxTurns = len(executor.StepKeys()) * (executor.Definition().MaxRepairIterations + 3)
+	if run == nil || strings.TrimSpace(run.ID) == "" {
+		return state
 	}
-	if maxTurns < 20 {
-		maxTurns = 20
+	state.CurrentStepKey = run.CurrentStep
+	steps, err := s.store.ListWorkflowSteps(ctx, run.ID)
+	if err != nil {
+		return state
 	}
-
-	for turn := 0; turn < maxTurns; turn++ {
-		decision := executor.NextAction(state)
-		switch decision.Action {
-		case lifecycler.ActionComplete:
-			return nil
-		case lifecycler.ActionBlocked:
-			return errors.New(firstNonEmpty(decision.Reason, "lifecycle runtime blocked"))
-		case lifecycler.ActionWaitHuman:
-			result.NeedsClarification = true
-			result.ClarificationStep = decision.Step.StepKey
-			result.Clarification = lifecycleHumanGateNotice(decision)
-			return nil
-		case lifecycler.ActionSkip:
-			state.Results[decision.Step.StepKey] = lifecycler.StepResult{
-				StepKey: decision.Step.StepKey,
-				Status:  zw.StepStatusSkipped,
-			}
-			state.CurrentStepKey = decision.NextStepKey
-		case lifecycler.ActionJump:
-			if decision.NextStepKey != "" {
-				forceNextRun[decision.NextStepKey] = true
-				delete(state.Results, decision.NextStepKey)
-			}
-			state.CurrentStepKey = decision.NextStepKey
-		case lifecycler.ActionRetry:
-			state.Attempts[decision.Step.StepKey]++
-			output, err := runStep(decision.Step.StepKey, true)
-			state.Results[decision.Step.StepKey] = lifecycleStepResult(decision.Step.StepKey, output, err)
-			if result.NeedsClarification {
-				return nil
-			}
-		case lifecycler.ActionRun:
-			force := forceNextRun[decision.Step.StepKey]
-			delete(forceNextRun, decision.Step.StepKey)
-			output, err := runStep(decision.Step.StepKey, force)
-			state.Results[decision.Step.StepKey] = lifecycleStepResult(decision.Step.StepKey, output, err)
-			state.CurrentStepKey = decision.Step.StepKey
-			if result.NeedsClarification {
-				return nil
-			}
-		case lifecycler.ActionRunParallel:
-			for _, step := range decision.Steps {
-				output, err := runStep(step.StepKey, false)
-				state.Results[step.StepKey] = lifecycleStepResult(step.StepKey, output, err)
-				if result.NeedsClarification {
-					return nil
-				}
-			}
-			state.CurrentStepKey = decision.Step.StepKey
-		default:
-			return fmt.Errorf("unknown lifecycle runtime action: %s", decision.Action)
+	for _, step := range steps {
+		if strings.TrimSpace(step.StepKey) == "" {
+			continue
 		}
+		state.Results[step.StepKey] = lifecycler.StepResult{
+			StepKey: step.StepKey,
+			Status:  step.Status,
+			Output:  step.Output,
+			Error:   step.Error,
+		}
+		if step.Status == zw.StepStatusFailed {
+			state.Attempts[step.StepKey]++
+		}
+		hydrateV03ResultFromWorkflowStep(result, step)
 	}
-	return errors.New("lifecycle runtime reached max_total_iterations")
+	if run.Status == zw.StatusWaitingUser && strings.TrimSpace(run.CurrentStep) != "" {
+		state.HumanGates[run.CurrentStep] = true
+	}
+	return state
 }
 
-func lifecycleStepResult(stepKey string, output string, err error) lifecycler.StepResult {
+func hydrateV03ResultFromWorkflowStep(result *v03WorkflowResult, step zw.Step) {
+	if result == nil {
+		return
+	}
+	switch step.StepKey {
+	case zw.StepManagerIntake:
+		result.Intake = firstNonEmpty(result.Intake, step.Output)
+	case zw.StepProductRequirements:
+		result.Product = firstNonEmpty(result.Product, step.Output)
+	case zw.StepArchitectPlan:
+		result.Architect = firstNonEmpty(result.Architect, step.Output)
+	case zw.StepDeveloperPlan:
+		result.Developer = firstNonEmpty(result.Developer, step.Output)
+	case zw.StepManagerFinal:
+		result.Final = firstNonEmpty(result.Final, step.Output)
+	}
+}
+
+func lifecycleRuntimeStepResult(output string, err error) lifecycleruntime.StepResult {
 	status := zw.StepStatusDone
 	errText := ""
 	if err != nil {
 		status = zw.StepStatusFailed
 		errText = err.Error()
 	}
-	return lifecycler.StepResult{
-		StepKey: stepKey,
-		Status:  status,
-		Output:  output,
-		Error:   errText,
+	return lifecycleruntime.StepResult{
+		Status: status,
+		Output: output,
+		Error:  errText,
 	}
 }
 

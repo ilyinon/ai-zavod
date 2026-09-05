@@ -429,6 +429,122 @@ Acceptance criteria:
 - выбранная workflow-группа автоматически привязывается к проекту перед запуском;
 - решение покрыто unit-тестами отдельно от UI.
 
+## V1.0.5 - Universal Lifecycle Runtime
+
+Сейчас в приложении есть lifecycle editor/executor, но реальные пайплайны частично исполняются отдельными ветками backend-кода: dev, research, CTF и security живут разными функциями. V1.0.5 должна сделать один универсальный runtime, который исполняет любой `LifecycleDefinition` и `LifecycleStep`, выбранный Люмен в orchestration decision.
+
+Цель:
+
+- один execution engine для Dev, Research, Security, CTF и кастомных групп;
+- lifecycle из UI должен быть не “картинкой/планом”, а реальным source of truth исполнения;
+- специальные возможности dev/research/CTF/security подключаются через step mode, tool profile и step handlers, а не через отдельные hardcoded workflows;
+- пользователь вмешивается только на `human_gate` или настоящем blocker.
+
+Source of truth:
+
+- `AgentGroup` выбирает команду;
+- `ProjectGroupBinding` хранит выбранную группу и lifecycle проекта;
+- `LifecycleDefinition` задает лимиты итераций, retries и общий режим;
+- `LifecycleStep` задает `stepKey`, `agentProfileId`, `mode`, `required`, `canRetry`, `maxRetries`, `onSuccessStepKey`, `onFailureStepKey`, `outputSchema`, `visibleToUser`;
+- `LifecycleExecutor` вычисляет следующий шаг, retry/return/branch/join/completion;
+- `WorkflowRun`, `WorkflowStep`, `WorkflowPlan`, `WorkflowPlanStep` фиксируют фактическое исполнение и UI-прогресс.
+
+Step modes:
+
+- `llm` - вызвать агента с его `soul.md`, default skills, capabilities и контекстом задачи;
+- `tool` - выполнить backend tool handler по `stepKey`/`toolProfileId`;
+- `checks` - запустить test/check runner через Code Execution Policy;
+- `review` - запустить Review Gate 2.0;
+- `artifact` - сохранить/обновить артефакт задачи;
+- `human_gate` - остановить workflow в `waiting_user` с понятным вопросом и resume после ответа;
+- `final` - собрать итог и закрыть workflow.
+
+Control flow:
+
+- Если шаг успешен, runtime идет в `onSuccessStepKey`, если он задан, иначе в следующий visible/ordered step.
+- Если шаг упал и `canRetry=true`, runtime повторяет его до `maxRetries`.
+- Если retry исчерпан и задан `onFailureStepKey`, runtime возвращается туда с причиной.
+- Если failure похож на настоящий blocker: scope, секрет, конфликт требований, внешний недоступный сервис, runtime ставит `waiting_user` или `blocked`.
+- Условия/ветки читаются из structured runtime config в `outputSchema`:
+  - `condition`;
+  - `branches`;
+  - `parallelSteps`;
+  - `joinStepKey`;
+  - `completionRules`;
+  - `humanGate`.
+- Parallel steps в V1.0.5 допускаются как runtime abstraction: можно исполнять последовательно с единым join, но trace/UI должны показывать их как parallel group.
+
+Нужно заменить hardcoded paths:
+
+- `runV03Workflow` должен стать adapter'ом или исчезнуть: dev lifecycle исполняется через Universal Lifecycle Runtime;
+- `runWebResearchWorkflow` должен быть набором handlers для modes/stepKeys `web_research`, `source_review`, `research_synthesis`, `research_notes`, `manager_final`;
+- `runCTFWorkflow` должен быть набором handlers для `ctf_intake`, `scope_check`, `artifact_collection`, `triage`, `hypothesis_board`, `category_solver`, `validation`, `writeup`;
+- `runSecurityWorkflow` должен исполняться lifecycle steps `security_scope`, `security_analysis`, `threat_model`, `remediation_plan`, `review`, `manager_final`;
+- legacy fallback остается только для миграции, если у проекта нет lifecycle.
+
+Runtime context для шага:
+
+- user request;
+- live Task Spec;
+- accepted answers;
+- project memory summary по безопасной policy;
+- latest relevant workflow outputs;
+- selected group/lifecycle/agent;
+- step runtime config;
+- tool profile;
+- agent `soul.md`;
+- agent default skills;
+- capability contract;
+- allowed read/write paths.
+
+Outputs:
+
+- каждый step сохраняет raw output в `WorkflowStep`;
+- user-visible summary очищается от JSON и служебного шума;
+- structured outputs парсятся step handler'ом;
+- изменения файлов идут только через controlled changes/apply;
+- evidence/source/research/CTF artifacts сохраняются в свои stores, не в чат.
+
+UI:
+
+- плашка lifecycle рядом с diff показывает реальный runtime graph;
+- popover показывает все dynamic steps, текущий step, retries, return links, skipped/parallel/join;
+- если workflow ждет пользователя, видно какой `human_gate` и какие input нужны;
+- кастомный lifecycle из editor исполняется тем же runtime без отдельной backend-ветки.
+
+Acceptance criteria:
+
+- Dev Squad проходит через lifecycle steps, а не через отдельный hardcoded dev loop;
+- Research Squad исполняется тем же runtime и вызывает web research handlers;
+- CTF Cell исполняется тем же runtime и сохраняет CTF workspace/evidence;
+- Security Audit исполняется тем же runtime;
+- кастомная группа с 2-3 `llm` шагами реально исполняется без добавления Go-кода;
+- `onFailureStepKey` возвращает задачу нужному шагу;
+- `human_gate` ставит run в `waiting_user` и resume продолжает с нужного места;
+- retries считаются по step/lifecycle лимитам;
+- UI показывает один фактический progress graph без дубликатов;
+- существующие тесты dev/research/CTF/security остаются зелеными.
+
+Implementation plan:
+
+1. Добавить `internal/lifecycleruntime` с `Runner`, `StepHandler`, `RuntimeContext`, `StepResult`.
+2. Зарегистрировать handlers для базовых modes: `llm`, `tool`, `checks`, `review`, `artifact`, `human_gate`, `final`.
+3. Перенести dev/research/CTF/security функции в handlers, оставив старые функции как thin compatibility wrappers на время миграции.
+4. На старте workflow брать `orchestration.Decision.GroupID/LifecycleID`, загружать `LifecycleExecutor` и запускать `Runner`.
+5. Сделать resume для `waiting_user`: accepted answers пишутся в Task Spec Store, runtime продолжает с gate или configured next step.
+6. Добавить trace events и нормальные stop reasons на уровне runtime.
+7. Обновить UI progress/popover, чтобы он читал фактические `WorkflowPlanStep`/`WorkflowStep`.
+8. Покрыть unit/integration тестами branching, retries, return, human gate, custom lifecycle, dev/research/CTF/security adapters.
+
+Implementation baseline:
+
+- `internal/lifecycleruntime.Runner` исполняет `LifecycleExecutor.NextAction` через registry step handlers.
+- Runner поддерживает ordered execution, retries, return/jump, blocked/done/waiting statuses, human gate stop, parallel abstraction with join semantics.
+- App service использует Runner для dev/custom lifecycle вместо собственного цикла `runV03RuntimeLifecycle`.
+- Resume из `waiting_user` переиспользует существующий `WorkflowRun`, восстанавливает runtime state из сохраненных `WorkflowStep` и продолжает следующий шаг.
+- Return target forced rerun переисполняет уже пройденный шаг, чтобы repair-loop не застревал на старом успешном результате.
+- Research/CTF/Security специализированные функции остаются compatibility wrappers до полного переноса их внутренних действий в `StepHandler`.
+
 ## Цель
 
 Локальное macOS desktop-приложение для управления AI-агентами через чат. Пользователь выбирает проект, пишет задачу, а входной агент "Люмен" принимает ее и отвечает через выбранную модель.
