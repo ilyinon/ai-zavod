@@ -66,9 +66,13 @@ type Service struct {
 
 	mu            sync.Mutex
 	agentStatuses map[string]agents.Status
+	chatWork      sync.Mutex
+	chatBusy      map[string]bool
+	projectQueues map[string]chan struct{}
 }
 
 type BootstrapState struct {
+	Chats               []TaskDTO               `json:"chats"`
 	Paths               config.Paths            `json:"paths"`
 	Projects            []ProjectDTO            `json:"projects"`
 	SelectedProjectID   string                  `json:"selectedProjectId"`
@@ -151,6 +155,7 @@ type DeleteProjectInput struct {
 }
 
 type SendMessageInput struct {
+	TaskID    string `json:"taskId"`
 	ProjectID string `json:"projectId"`
 	Content   string `json:"content"`
 }
@@ -407,10 +412,6 @@ func NewService(ctx context.Context, sink EventSink) (*Service, error) {
 		sink:          sink,
 		agentStatuses: map[string]agents.Status{},
 	}
-	if err := service.ensureDefaultProject(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	if err := db.EnsureDefaultAgentGroups(ctx, activeModel.ID); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -451,26 +452,25 @@ func (s *Service) Bootstrap(ctx context.Context) (BootstrapState, error) {
 		return BootstrapState{}, err
 	}
 
-	selectedID, _, _ := s.store.GetSetting(ctx, selectedProjectSetting)
-	if selectedID == "" && len(projects) > 0 {
-		selectedID = projects[0].ID
-	}
-
+	selectedID := ""
 	state := ProjectState{}
-	if selectedID != "" {
-		projectState, err := s.projectState(ctx, selectedID)
-		if err == nil {
-			state = projectState
-		} else if len(projects) > 0 {
-			selectedID = projects[0].ID
-			state, err = s.projectState(ctx, selectedID)
-			if err != nil {
-				return BootstrapState{}, err
-			}
-		}
-	}
 
+	chats, err := s.store.ListChats(ctx)
+	if err != nil {
+		return BootstrapState{}, err
+	}
+	selectedChatID, _, _ := s.store.GetSetting(ctx, "selected_chat_id")
+	if selectedChatID != "" {
+		if selected, selectErr := s.SelectChat(ctx, selectedChatID); selectErr == nil {
+			state = selected
+			selectedID = selected.Project.ID
+		}
+	} else {
+		state = ProjectState{}
+		selectedID = ""
+	}
 	return BootstrapState{
+		Chats:               chats,
 		Paths:               s.paths,
 		Projects:            projects,
 		SelectedProjectID:   selectedID,
@@ -579,6 +579,11 @@ func (s *Service) resolveProjectGroupChoice(ctx context.Context, groupID string,
 }
 
 func (s *Service) UpdateProject(ctx context.Context, input UpdateProjectInput) (ProjectDTO, error) {
+	unlock, err := s.lockProjectEdit(ctx, input.ProjectID)
+	if err != nil {
+		return ProjectDTO{}, err
+	}
+	defer unlock()
 	projectID := strings.TrimSpace(input.ProjectID)
 	if projectID == "" {
 		return ProjectDTO{}, fmt.Errorf("project_id пустой")
@@ -607,6 +612,11 @@ func (s *Service) UpdateProject(ctx context.Context, input UpdateProjectInput) (
 }
 
 func (s *Service) DeleteProject(ctx context.Context, input DeleteProjectInput) (BootstrapState, error) {
+	unlock, err := s.lockProjectEdit(ctx, input.ProjectID)
+	if err != nil {
+		return BootstrapState{}, err
+	}
+	defer unlock()
 	projectID := strings.TrimSpace(input.ProjectID)
 	if projectID == "" {
 		return BootstrapState{}, fmt.Errorf("project_id пустой")
@@ -617,9 +627,6 @@ func (s *Service) DeleteProject(ctx context.Context, input DeleteProjectInput) (
 	selectedID, _, _ := s.store.GetSetting(ctx, selectedProjectSetting)
 	if selectedID == projectID {
 		_ = s.store.SetSetting(ctx, selectedProjectSetting, "")
-	}
-	if err := s.ensureDefaultProject(ctx); err != nil {
-		return BootstrapState{}, err
 	}
 	return s.Bootstrap(ctx)
 }
@@ -634,7 +641,16 @@ func (s *Service) SelectProject(ctx context.Context, projectID string) (ProjectS
 	if err := s.store.SetSetting(ctx, selectedProjectSetting, projectID); err != nil {
 		return ProjectState{}, err
 	}
-	return s.projectState(ctx, projectID)
+	tasks, err := s.store.ListChats(ctx)
+	if err != nil {
+		return ProjectState{}, err
+	}
+	for _, task := range tasks {
+		if task.ProjectID == projectID && task.Status == "active" {
+			return s.SelectChat(ctx, task.ID)
+		}
+	}
+	return s.CreateChat(ctx, CreateChatInput{ProjectID: projectID})
 }
 
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (ChatState, error) {
@@ -643,37 +659,51 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		return ChatState{}, fmt.Errorf("сообщение пустое")
 	}
 
-	currentProject, err := s.store.GetProject(ctx, input.ProjectID)
+	task, err := s.messageTask(ctx, input)
 	if err != nil {
 		return ChatState{}, err
 	}
-	_ = s.store.TouchProject(ctx, input.ProjectID)
-	_ = s.store.SetSetting(ctx, selectedProjectSetting, input.ProjectID)
-	_, _ = s.ensureProjectMemory(ctx, currentProject)
-
-	task, err := s.store.GetActiveTask(ctx, input.ProjectID)
+	ctx = context.WithValue(ctx, chatContextKey{}, task.ID)
+	input.ProjectID = task.ProjectID
+	release, err := s.acquireChatWork(ctx, *task)
 	if err != nil {
 		return ChatState{}, err
 	}
-	if task == nil {
-		created, err := s.store.CreateTask(ctx, input.ProjectID, titleFromContent(content))
+	defer release()
+	currentProject := project.Project{}
+	if task.ProjectID != "" {
+		currentProject, err = s.store.GetProject(ctx, task.ProjectID)
 		if err != nil {
 			return ChatState{}, err
 		}
-		task = &created
+		_ = s.store.TouchProject(ctx, task.ProjectID)
+		_, _ = s.ensureProjectMemory(ctx, currentProject)
 	}
-
-	if _, err := s.store.AddMessage(ctx, task.ID, "user", "", content); err != nil {
+	if task.Title == "Новый чат" {
+		task.Title = titleFromContent(content)
+	}
+	resumingWorkspace := task.PendingRequest == content && task.ProjectID != ""
+	task.PendingRequest = ""
+	if _, err := s.store.UpdateChat(ctx, *task); err != nil {
 		return ChatState{}, err
+	}
+	if !resumingWorkspace {
+		if _, err := s.store.AddMessage(ctx, task.ID, "user", "", content); err != nil {
+			return ChatState{}, err
+		}
 	}
 	_ = s.store.TouchTask(ctx, task.ID)
 	s.emitChatState(ctx, input.ProjectID, "")
 
 	model, err := s.store.ActiveModelConfig(ctx)
+	if task.ModelID != "" {
+		model, err = s.store.GetModelConfig(ctx, task.ModelID)
+	}
 	if err != nil {
 		return ChatState{}, err
 	}
 	provider := openaiapi.NewClient(model.BaseURL, model.APIKeyRef)
+	ctx = s.chatGroupContext(ctx, *task, task.GroupID)
 
 	latestRun, err := s.store.LatestWorkflowRun(ctx, task.ID)
 	if err != nil {
@@ -686,19 +716,29 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		decision = s.classifyIntentWithModel(ctx, provider, model, currentProject, *task, latestRun, content, decision)
 	}
 	orch := s.orchestrateMessage(ctx, currentProject, *task, content, decision, model.ID)
+	if task.GroupID != "" {
+		if group, err := s.store.GetAgentGroup(ctx, task.GroupID); err == nil {
+			orch.GroupID, orch.LifecycleID = group.ID, group.DefaultLifecycleID
+		}
+	}
 	decision.NeedsWorkflow = orch.NeedsWorkflow
 	decision.NeedsProjectContext = orch.NeedsProjectContext
 	s.emitChatState(ctx, input.ProjectID, "")
+	if task.ProjectID == "" && decision.Intent == router.IntentResearchTask {
+		return s.researchWithoutProject(ctx, *task, provider, model, content)
+	}
+	if task.ProjectID == "" && orch.NeedsWorkflow {
+		task.PendingRequest = content
+		if _, err := s.store.UpdateChat(ctx, *task); err != nil {
+			return ChatState{}, err
+		}
+		s.resetAgentStatuses(model.ID)
+		return s.emitChatState(ctx, "", ""), nil
+	}
 	if !orch.NeedsWorkflow {
 		return s.answerDirect(ctx, currentProject, *task, latestRun, provider, model, content, decision, orch)
 	}
-	if strings.TrimSpace(orch.GroupID) != "" {
-		if _, bindErr := s.store.BindProjectToAgentGroup(ctx, input.ProjectID, orch.GroupID, orch.LifecycleID); bindErr == nil {
-			if refreshed, refreshErr := s.store.GetProject(ctx, input.ProjectID); refreshErr == nil {
-				currentProject = refreshed
-			}
-		}
-	}
+	ctx = s.chatGroupContext(ctx, *task, orch.GroupID)
 	useCTFWorkflow := decision.Intent == router.IntentPentestTask && s.shouldUseCTFWorkflow(ctx, input.ProjectID, content)
 
 	resumingRun := decision.Intent == router.IntentClarificationAnswer && latestRun != nil && latestRun.Status == zw.StatusWaitingUser
@@ -1112,8 +1152,6 @@ func (s *Service) orchestrateMessage(
 	}
 	hasSpec := false
 	if spec, err := s.store.LatestTaskSpecByTask(ctx, task.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
-		hasSpec = true
-	} else if spec, err := s.store.LatestTaskSpecByProject(ctx, currentProject.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
 		hasSpec = true
 	}
 	hasMemory := false
@@ -2150,7 +2188,7 @@ func (s *Service) SubmitClarification(ctx context.Context, input SubmitClarifica
 		return ChatState{}, fmt.Errorf("нужен хотя бы один ответ")
 	}
 
-	task, err := s.store.GetActiveTask(ctx, projectID)
+	task, err := s.store.WorkflowTask(ctx, workflowRunID, projectID)
 	if err != nil {
 		return ChatState{}, err
 	}
@@ -2174,12 +2212,18 @@ func (s *Service) SubmitClarification(ctx context.Context, input SubmitClarifica
 		Source:          "clarification_answers",
 	}, true)
 	return s.SendMessage(ctx, SendMessageInput{
+		TaskID:    task.ID,
 		ProjectID: projectID,
 		Content:   clarificationAnswersMessage(answers),
 	})
 }
 
 func (s *Service) ApplyWorkflowChanges(ctx context.Context, input ApplyWorkflowChangesInput) (ChatState, error) {
+	ctx, release, err := s.acquireWorkflowWork(ctx, input.ProjectID, input.WorkflowRunID)
+	if err != nil {
+		return ChatState{}, err
+	}
+	defer release()
 	projectID := strings.TrimSpace(input.ProjectID)
 	workflowRunID := strings.TrimSpace(input.WorkflowRunID)
 	if projectID == "" || workflowRunID == "" {
@@ -2235,17 +2279,20 @@ func (s *Service) ApplyWorkflowChanges(ctx context.Context, input ApplyWorkflowC
 	}
 	state := s.emitChatState(ctx, projectID, "")
 	if applied > 0 && modelErr == nil && taskID != "" {
-		go func() {
-			if err := s.suggestTestCommands(ctx, currentProject, taskID, workflowRunID, model); err != nil {
-				s.setAgentStatus(agents.TesterID, "failed", "Не удалось подготовить проверки: "+err.Error(), model.ID)
-				s.emitChatState(ctx, projectID, "")
-			}
-		}()
+		if err := s.suggestTestCommands(ctx, currentProject, taskID, workflowRunID, model); err != nil {
+			s.setAgentStatus(agents.TesterID, "failed", "Не удалось подготовить проверки: "+err.Error(), model.ID)
+			s.emitChatState(ctx, projectID, "")
+		}
 	}
 	return state, nil
 }
 
 func (s *Service) RollbackWorkflowChanges(ctx context.Context, input RollbackWorkflowChangesInput) (ChatState, error) {
+	ctx, release, err := s.acquireWorkflowWork(ctx, input.ProjectID, input.WorkflowRunID)
+	if err != nil {
+		return ChatState{}, err
+	}
+	defer release()
 	projectID := strings.TrimSpace(input.ProjectID)
 	workflowRunID := strings.TrimSpace(input.WorkflowRunID)
 	if projectID == "" || workflowRunID == "" {
@@ -2679,6 +2726,11 @@ func (s *Service) RunTestCommand(ctx context.Context, input RunTestCommandInput)
 	if testRun.ProjectID != projectID {
 		return ChatState{}, fmt.Errorf("проверка относится к другому проекту")
 	}
+	ctx, release, err := s.acquireWorkflowWork(ctx, projectID, testRun.WorkflowRunID)
+	if err != nil {
+		return ChatState{}, err
+	}
+	defer release()
 
 	modelID := ""
 	if model, err := s.store.ActiveModelConfig(ctx); err == nil {
@@ -2778,6 +2830,11 @@ func latestTestRunsByCommand(items []checks.TestRun) []checks.TestRun {
 }
 
 func (s *Service) RunReview(ctx context.Context, input RunReviewInput) (ChatState, error) {
+	ctx, release, err := s.acquireWorkflowWork(ctx, input.ProjectID, input.WorkflowRunID)
+	if err != nil {
+		return ChatState{}, err
+	}
+	defer release()
 	projectID := strings.TrimSpace(input.ProjectID)
 	workflowRunID := strings.TrimSpace(input.WorkflowRunID)
 	if projectID == "" || workflowRunID == "" {
@@ -2788,7 +2845,7 @@ func (s *Service) RunReview(ctx context.Context, input RunReviewInput) (ChatStat
 	if err != nil {
 		return ChatState{}, err
 	}
-	task, err := s.store.GetActiveTask(ctx, projectID)
+	task, err := s.store.WorkflowTask(ctx, workflowRunID, projectID)
 	if err != nil {
 		return ChatState{}, err
 	}
@@ -4075,11 +4132,14 @@ func (s *Service) AgentStatuses() []agents.Status {
 }
 
 func (s *Service) projectState(ctx context.Context, projectID string) (ProjectState, error) {
+	if projectID == "" {
+		return s.unboundChatState(ctx)
+	}
 	item, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		return ProjectState{}, err
 	}
-	task, err := s.store.GetActiveTask(ctx, projectID)
+	task, err := s.contextTask(ctx, projectID)
 	if err != nil {
 		return ProjectState{}, err
 	}
@@ -4100,6 +4160,9 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 	var ctfWorkspace *CTFWorkspaceDTO
 	var activeGroup *agentgroups.Group
 	var groupBinding *agentgroups.ProjectBinding
+	if task != nil {
+		ctx = s.chatGroupContext(ctx, *task, task.GroupID)
+	}
 	binding, err := s.store.ProjectGroupBinding(ctx, projectID)
 	if err != nil {
 		return ProjectState{}, err
@@ -4158,6 +4221,15 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 	artifactsList, err = s.store.ListArtifacts(ctx, projectID, 20)
 	if err != nil {
 		return ProjectState{}, err
+	}
+	if task != nil {
+		filtered := artifactsList[:0]
+		for _, artifact := range artifactsList {
+			if artifact.TaskID == task.ID {
+				filtered = append(filtered, artifact)
+			}
+		}
+		artifactsList = filtered
 	}
 	if task != nil && workflowRun != nil {
 		ctfWorkspace = s.buildCTFWorkspaceState(item, task, workflowRun, workflowSteps, artifactsList)
@@ -4672,26 +4744,6 @@ func (s *Service) emitModels(models []llm.ModelConfig) {
 		return
 	}
 	s.sink.Emit("models_changed", models)
-}
-
-func (s *Service) ensureDefaultProject(ctx context.Context) error {
-	count, err := s.store.CountProjects(ctx)
-	if err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-
-	path := uniqueProjectPath(s.paths.ProjectsDir, "project-1")
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return err
-	}
-	item, err := s.store.CreateProject(ctx, "Первый проект", path)
-	if err != nil {
-		return err
-	}
-	return s.store.SetSetting(ctx, selectedProjectSetting, item.ID)
 }
 
 func safeProjectDirName(name string) string {
@@ -5826,8 +5878,10 @@ func (s *Service) reviewGateReport(ctx context.Context, project project.Project,
 	testRuns = latestTestRunsByCommand(testRuns)
 	taskBlueprint, _ := s.store.LatestTaskBlueprint(ctx, workflowRunID)
 	var taskSpec *taskspec.Spec
-	if spec, err := s.store.LatestTaskSpecByProject(ctx, project.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
-		taskSpec = &spec
+	if task, err := s.store.WorkflowTask(ctx, workflowRunID, project.ID); err == nil {
+		if spec, err := s.store.LatestTaskSpecByTask(ctx, task.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
+			taskSpec = &spec
+		}
 	}
 	return reviewgate.Build(reviewgate.Input{
 		TaskSpec:  taskSpec,
@@ -6271,6 +6325,9 @@ func (s *Service) buildDirectAnswerInput(ctx context.Context, project project.Pr
 		}
 	}
 
+	if project.ID == "" {
+		return builder.String()
+	}
 	artifactContext := s.latestArtifactContext(ctx, project)
 	if artifactContext != "" {
 		builder.WriteString("\n# Relevant saved artifacts\n")
@@ -6299,6 +6356,9 @@ func (s *Service) latestArtifactContext(ctx context.Context, project project.Pro
 	includedTaskSpec := false
 	included := 0
 	for _, item := range items {
+		if taskID, ok := ctx.Value(chatContextKey{}).(string); ok && item.TaskID != taskID {
+			continue
+		}
 		if included >= 4 {
 			break
 		}
@@ -6431,6 +6491,9 @@ func (s *Service) patchTaskSpec(ctx context.Context, patch taskspec.Spec, replac
 }
 
 func (s *Service) ensureProjectMemory(ctx context.Context, currentProject project.Project) (projectmemory.Memory, error) {
+	if currentProject.ID == "" || currentProject.Path == "" {
+		return projectmemory.Memory{}, fmt.Errorf("рабочий проект не выбран")
+	}
 	current, err := s.store.ProjectMemory(ctx, currentProject.ID)
 	if err != nil {
 		return projectmemory.Memory{}, err
@@ -6845,6 +6908,7 @@ func (s *Service) savedTaskSpecAnswer(ctx context.Context, project project.Proje
 		if spec, err := s.store.LatestTaskSpecByTask(ctx, task.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
 			return "## Спека задачи\n\n" + taskspec.RenderMarkdown(spec)
 		}
+		return "В этом чате пока нет сохранённой спецификации задачи."
 	}
 	if spec, err := s.store.LatestTaskSpecByProject(ctx, project.ID); err == nil && strings.TrimSpace(spec.ID) != "" {
 		return "## Спека задачи\n\n" + taskspec.RenderMarkdown(spec)

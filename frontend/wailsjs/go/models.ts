@@ -599,6 +599,7 @@ export namespace app {
 		}
 	}
 	export class BootstrapState {
+	    chats: chat.Task[];
 	    paths: config.Paths;
 	    projects: project.Project[];
 	    selectedProjectId: string;
@@ -617,6 +618,7 @@ export namespace app {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chats = this.convertValues(source["chats"], chat.Task);
 	        this.paths = this.convertValues(source["paths"], config.Paths);
 	        this.projects = this.convertValues(source["projects"], project.Project);
 	        this.selectedProjectId = source["selectedProjectId"];
@@ -773,6 +775,18 @@ export namespace app {
 	        this.kind = source["kind"];
 	        this.description = source["description"];
 	        this.defaultModelId = source["defaultModelId"];
+	    }
+	}
+	export class CreateChatInput {
+	    projectId: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CreateChatInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.projectId = source["projectId"];
 	    }
 	}
 	export class CreateProjectInput {
@@ -1063,6 +1077,7 @@ export namespace app {
 	    }
 	}
 	export class SendMessageInput {
+	    taskId: string;
 	    projectId: string;
 	    content: string;
 	
@@ -1072,6 +1087,7 @@ export namespace app {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.taskId = source["taskId"];
 	        this.projectId = source["projectId"];
 	        this.content = source["content"];
 	    }
@@ -1142,6 +1158,30 @@ export namespace app {
 	        this.kind = source["kind"];
 	        this.description = source["description"];
 	        this.defaultModelId = source["defaultModelId"];
+	    }
+	}
+	export class UpdateChatInput {
+	    groupId: string;
+	    modelId: string;
+	    taskId: string;
+	    title: string;
+	    projectId: string;
+	    pinned: boolean;
+	    archived: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new UpdateChatInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.groupId = source["groupId"];
+	        this.modelId = source["modelId"];
+	        this.taskId = source["taskId"];
+	        this.title = source["title"];
+	        this.projectId = source["projectId"];
+	        this.pinned = source["pinned"];
+	        this.archived = source["archived"];
 	    }
 	}
 	export class UpdateProjectInput {
@@ -1387,12 +1427,16 @@ export namespace chat {
 	    }
 	}
 	export class Task {
+	    groupId: string;
+	    modelId: string;
 	    id: string;
 	    projectId: string;
 	    title: string;
 	    status: string;
 	    createdAt: string;
 	    updatedAt: string;
+	    pinned: boolean;
+	    pendingRequest?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Task(source);
@@ -1400,12 +1444,16 @@ export namespace chat {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.groupId = source["groupId"];
+	        this.modelId = source["modelId"];
 	        this.id = source["id"];
 	        this.projectId = source["projectId"];
 	        this.title = source["title"];
 	        this.status = source["status"];
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
+	        this.pinned = source["pinned"];
+	        this.pendingRequest = source["pendingRequest"];
 	    }
 	}
 
@@ -1937,4 +1985,3 @@ export namespace workflow {
 	}
 
 }
-

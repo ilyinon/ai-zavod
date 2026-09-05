@@ -1,4 +1,6 @@
 import { FormEvent, KeyboardEvent, MouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { FolderPlus, FolderOpen, X, ArrowUp, Plus } from 'lucide-react';
+import { ChatSidebar } from './ChatSidebar';
 import {
   AgentGroup,
   AgentGroupTemplate,
@@ -23,6 +25,7 @@ import {
   ProjectGroupBinding,
   ProjectState,
   TaskBlueprint,
+  Task,
   WebSource,
   WebSettings,
   WorkflowRun,
@@ -129,6 +132,10 @@ const changeActionLabels: Record<string, string> = {
   replace: 'заменить',
 };
 
+function upsertChat(chats: Task[], task: Task): Task[] {
+  return [task, ...chats.filter(item => item.id !== task.id)].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+}
+
 function listToLines(items: string[] = []): string {
   return items.join('\n');
 }
@@ -190,6 +197,19 @@ const lifecycleModes = ['llm', 'tool', 'checks', 'review', 'artifact', 'final', 
 type SettingsTab = 'projects' | 'groups' | 'models' | 'web';
 
 function App() {
+  const [chats, setChats] = useState<Task[]>([]);
+  const [currentTask, setCurrentTask] = useState<Task | null>(null);
+  const selectedChatRef = useRef('');
+  const selectedRunRef = useRef('');
+  const navigationRef = useRef(0);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const draftsRef = useRef<Record<string, string>>({});
+  const [chatActivity, setChatActivity] = useState<Record<string, string>>({});
+  const [quickProjectOpen, setQuickProjectOpen] = useState(false);
+  const [workspacePrompt, setWorkspacePrompt] = useState(false);
+  const [quickProjectName, setQuickProjectName] = useState('');
+  const [quickProjectPath, setQuickProjectPath] = useState('');
+  const [quickProjectSaving, setQuickProjectSaving] = useState(false);
   const [paths, setPaths] = useState<AppPaths | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -273,10 +293,9 @@ function App() {
   useEffect(() => {
     loadBootstrap();
 
-    const offStatus = backend.onAgentStatusChanged((status) => {
-      setAgents((previous) => upsertAgent(previous, status));
-    });
     const offChat = backend.onChatStateChanged((state) => {
+      if (state.task) setChats(previous => upsertChat(previous, state.task!));
+      if (state.task?.id !== selectedChatRef.current) return;
       applyChatState(state);
       setAgents(state.agents);
       if (state.error) {
@@ -285,11 +304,15 @@ function App() {
     });
     const offDelta = backend.onAgentMessageDelta(handleAgentMessageDelta);
     const offWorkflowRun = backend.onWorkflowRunChanged((run) => {
+      if (run.taskId !== selectedChatRef.current) return;
+      selectedRunRef.current = run.id;
       setWorkflowRun(run);
     });
     const offWorkflowStep = backend.onWorkflowStepChanged((step) => {
+      if (step.workflowRunId !== selectedRunRef.current) return;
       setWorkflowSteps((previous) => upsertWorkflowStep(previous, step));
     });
+    const offActivity = backend.onChatActivity(activity => setChatActivity(previous => ({ ...previous, [activity.taskId]: activity.status })));
     const offModels = backend.onModelsChanged((nextModels) => {
       setModels(nextModels);
       const active = nextModels.find((model) => model.isActive);
@@ -299,8 +322,8 @@ function App() {
     });
 
     return () => {
-      offStatus();
       offChat();
+      offActivity();
       offDelta();
       offWorkflowRun();
       offWorkflowStep();
@@ -359,8 +382,8 @@ function App() {
   }, [agentGroups, newProjectGroupId, existingProjectGroupId]);
 
   const activeModel = useMemo(
-    () => models.find((model) => model.id === activeModelId) ?? models.find((model) => model.isActive) ?? null,
-    [models, activeModelId],
+    () => models.find((model) => model.id === (currentTask?.modelId || activeModelId)) ?? models.find((model) => model.isActive) ?? null,
+    [models, activeModelId, currentTask?.modelId],
   );
 
   const visibleProjects = useMemo(() => {
@@ -394,6 +417,7 @@ function App() {
       const state = await backend.bootstrap();
       setPaths(state.paths);
       setProjects(state.projects);
+      setChats(state.chats ?? []);
       setSelectedProjectId(state.selectedProjectId);
       applyProjectState(state.chat);
       setAgents(state.agents);
@@ -411,10 +435,12 @@ function App() {
   }
 
   function applyProjectState(state: ProjectState) {
-    if (state.project?.id) {
-      setCurrentProject(state.project);
-      setSelectedProjectId(state.project.id);
-    }
+    if (selectedChatRef.current !== (state.task?.id ?? '')) { setStreamingMessage(null); setSending(false); }
+    selectedChatRef.current = state.task?.id ?? '';
+    selectedRunRef.current = state.workflowRun?.id ?? '';
+    setCurrentTask(state.task ?? null);
+    setCurrentProject(state.project?.id ? state.project : null);
+    setSelectedProjectId(state.project?.id ?? '');
     setMessages(state.messages ?? []);
     setWorkflowRun(state.workflowRun ?? null);
     setWorkflowSteps(state.workflowSteps ?? []);
@@ -434,6 +460,7 @@ function App() {
   }
 
   function handleAgentMessageDelta(delta: AgentMessageDelta) {
+    if (delta.taskId !== selectedChatRef.current) return;
     if (delta.error) {
       setError(delta.error);
     }
@@ -477,12 +504,13 @@ function App() {
     event.preventDefault();
     setError('');
     try {
-      await backend.createProject(newProjectName, newProjectGroupId, lifecycleForGroup(agentGroups, newProjectGroupId));
+      const project = await backend.createProject(newProjectName, newProjectGroupId, lifecycleForGroup(agentGroups, newProjectGroupId));
       setNewProjectName('');
       setNewProjectGroupId(defaultProjectGroupId(agentGroups));
       setShowNewProject(false);
       setSettingsOpen(false);
-      await loadBootstrap();
+      setProjects(previous => [project, ...previous]);
+      await handleNewChat(project.id);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -492,7 +520,7 @@ function App() {
     event.preventDefault();
     setError('');
     try {
-      await backend.addExistingProject(
+      const project = await backend.addExistingProject(
         existingProjectName,
         existingProjectPath,
         existingProjectGroupId,
@@ -503,7 +531,8 @@ function App() {
       setExistingProjectGroupId(defaultProjectGroupId(agentGroups));
       setShowExistingProject(false);
       setSettingsOpen(false);
-      await loadBootstrap();
+      setProjects(previous => [project, ...previous]);
+      await handleNewChat(project.id);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -552,6 +581,7 @@ function App() {
     try {
       const state = await backend.deleteProject(project.id);
       setProjects(state.projects);
+      setChats(state.chats ?? []);
       setSelectedProjectId(state.selectedProjectId);
       setActiveModelId(state.activeModelId);
       setModels(state.models);
@@ -567,11 +597,13 @@ function App() {
   async function handleSendMessage(event?: FormEvent) {
     event?.preventDefault();
     const content = messageInput.trim();
-    if (!content || !selectedProjectId || sending) {
+    const navigation = navigationRef.current;
+    if (!content || sending || (currentTask && chatActivity[currentTask.id] && chatActivity[currentTask.id] !== 'idle')) {
       return;
     }
 
     setMessageInput('');
+    draftsRef.current[selectedChatRef.current] = '';
     setSending(true);
     setStreamingMessage(null);
     setError('');
@@ -588,17 +620,90 @@ function App() {
     ]);
 
     try {
-      const state = await backend.sendMessage(selectedProjectId, content);
-      applyChatState(state);
-      setAgents(state.agents);
-      if (state.error) {
-        setError(state.error);
+      let task = currentTask;
+      if (!task) {
+        const created = await backend.createChat(selectedProjectId);
+        task = created.task!;
+        if (navigationRef.current === navigation) { selectedChatRef.current = task.id; setCurrentTask(task); }
+        setChats(previous => upsertChat(previous, task!));
       }
+      await sendChatRequest(task, content);
     } catch (err) {
-      setError(errorMessage(err));
+      if (navigationRef.current === navigation) setError(errorMessage(err));
     } finally {
-      setSending(false);
+      if (navigationRef.current === navigation) setSending(false);
     }
+  }
+
+  async function sendChatRequest(task: Task, content: string) {
+    setChatActivity(previous => ({ ...previous, [task.id]: 'running' }));
+    try {
+      const state = await backend.sendMessage(task.projectId, content, task.id);
+      if (state.task) setChats(previous => upsertChat(previous, state.task!));
+      if (selectedChatRef.current === task.id) { applyChatState(state); setAgents(state.agents); if (state.error) setError(state.error); }
+    } finally { setChatActivity(previous => ({ ...previous, [task.id]: 'idle' })); }
+  }
+
+  async function handleNewChat(projectId = '') {
+    draftsRef.current[selectedChatRef.current] = messageInput;
+    const request = ++navigationRef.current;
+    setError('');
+    try {
+      const state = await backend.createChat(projectId);
+      setChats(previous => upsertChat(previous, state.task!));
+      if (request !== navigationRef.current) return;
+      applyProjectState(state); setMessageInput('');
+      composerRef.current?.focus();
+    } catch (err) { setError(errorMessage(err)); }
+  }
+
+  async function handleSelectChat(id: string) {
+    draftsRef.current[selectedChatRef.current] = messageInput;
+    const request = ++navigationRef.current;
+    selectedChatRef.current = id; selectedRunRef.current = '';
+    setStreamingMessage(null); setSending(false);
+    setError('');
+    try { const state = await backend.selectChat(id); if (request === navigationRef.current) { applyProjectState(state); setMessageInput(draftsRef.current[id] ?? ''); } }
+    catch (err) { setError(errorMessage(err)); }
+  }
+
+  async function handleUpdateChat(task: Task) {
+    const updated = await backend.updateChat(task);
+    setChats(previous => upsertChat(previous, updated));
+    if (selectedChatRef.current === task.id) await handleSelectChat(task.id);
+  }
+
+  async function setChatPreference(key: 'groupId' | 'modelId', value: string) {
+    let task = currentTask;
+    if (!task) { const state = await backend.createChat(selectedProjectId); task = state.task!; applyProjectState(state); }
+    const updated = await backend.updateChat({ ...task, [key]: value });
+    setChats(previous => upsertChat(previous, updated)); setCurrentTask(updated);
+  }
+
+  async function handleDeleteChat(id: string) {
+    await backend.deleteChat(id);
+    setChats(previous => previous.filter(task => task.id !== id));
+    if (selectedChatRef.current === id) { applyProjectState({} as ProjectState); setMessageInput(''); }
+  }
+
+  async function attachProject(projectId: string, resume = false) {
+    if (!currentTask) { await handleNewChat(projectId); return; }
+    const pending = currentTask.pendingRequest;
+    const updated = await backend.updateChat({ ...currentTask, projectId });
+    setChats(previous => upsertChat(previous, updated));
+    applyProjectState(await backend.selectChat(updated.id));
+    if (resume && pending) await sendChatRequest(updated, pending);
+  }
+
+  async function saveQuickProject(event: FormEvent) {
+    event.preventDefault(); setQuickProjectSaving(true); setError('');
+    try {
+      const name = quickProjectName.trim() || currentTask?.title || 'Новый проект';
+      const project = quickProjectPath.trim() ? await backend.addExistingProject(name, quickProjectPath.trim()) : await backend.createProject(name);
+      setProjects(previous => [project, ...previous]); setQuickProjectOpen(false);
+      setQuickProjectName(''); setQuickProjectPath('');
+      if (workspacePrompt) await attachProject(project.id, true); else await handleNewChat(project.id);
+    } catch (err) { setError(errorMessage(err)); } finally { setQuickProjectSaving(false); }
   }
 
   async function handleSubmitClarification(event: FormEvent) {
@@ -1198,129 +1303,18 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar projects-panel">
-        <div className="panel-heading">
-          <div>
-            <h1>Проекты</h1>
-          </div>
-          <div className="header-actions">
-            <button className="icon-button" title="Настройки проектов" onClick={() => openSettings('projects')}>
-              ⚙
-            </button>
-            <button className="icon-button" title="Обновить" onClick={loadBootstrap}>
-              ↻
-            </button>
-          </div>
-        </div>
-
-        <label className="field-label" htmlFor="project-search">
-          Поиск
-        </label>
-        <input
-          id="project-search"
-          className="input"
-          placeholder="Название или путь"
-          value={projectQuery}
-          onChange={(event) => setProjectQuery(event.target.value)}
-        />
-
-        <div className="project-list">
-          {loading && <p className="muted">Загружаю проекты...</p>}
-          {!loading &&
-            visibleProjects.map((project) => {
-              const isEditing = editingProjectId === project.id;
-              if (isEditing) {
-                return (
-                  <form
-                    key={project.id}
-                    className={`project-item project-edit-card ${project.id === selectedProjectId ? 'active' : ''}`}
-                    onSubmit={handleUpdateProject}
-                  >
-                    <input
-                      className="input project-edit-input"
-                      aria-label="Название проекта"
-                      value={editingProjectName}
-                      onChange={(event) => setEditingProjectName(event.target.value)}
-                    />
-                    <input
-                      className="input project-edit-input"
-                      aria-label="Путь проекта"
-                      value={editingProjectPath}
-                      onChange={(event) => setEditingProjectPath(event.target.value)}
-                    />
-                    <div className="project-edit-actions">
-                      <button className="project-save-button" type="submit">
-                        Сохранить
-                      </button>
-                      <button className="project-cancel-button" type="button" onClick={cancelEditProject}>
-                        Отмена
-                      </button>
-                    </div>
-                  </form>
-                );
-              }
-
-              return (
-                <div key={project.id} className={`project-item ${project.id === selectedProjectId ? 'active' : ''}`}>
-                  <button className="project-select-button" type="button" onClick={() => handleSelectProject(project.id)}>
-                    <span className="project-name">{project.name}</span>
-                    <span className="project-path">{project.path}</span>
-                  </button>
-                  {confirmDeleteProjectId === project.id ? (
-                    <div className="project-delete-confirm">
-                      <button
-                        className="project-confirm-delete-button"
-                        type="button"
-                        title="Папка на диске останется"
-                        onClick={() => void handleDeleteProject(project)}
-                      >
-                        Удалить
-                      </button>
-                      <button className="project-cancel-delete-button" type="button" onClick={() => setConfirmDeleteProjectId('')}>
-                        Отмена
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="project-item-actions">
-                      <button
-                        className="project-icon-button"
-                        type="button"
-                        title="Редактировать проект"
-                        aria-label={`Редактировать ${project.name}`}
-                        onClick={() => startEditProject(project)}
-                      >
-                        ✎
-                      </button>
-                      <button
-                        className="project-icon-button danger"
-                        type="button"
-                        title="Удалить из списка"
-                        aria-label={`Удалить ${project.name}`}
-                        onClick={() => void handleDeleteProject(project)}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          {!loading && visibleProjects.length === 0 && <p className="muted">Проекты не найдены.</p>}
-        </div>
-
-        {paths && (
-          <div className="path-note">
-            <span>Каталог проектов</span>
-            <code>{paths.projectsDir}</code>
-          </div>
-        )}
-      </aside>
+    <main className={`app-shell chats-layout ${blueprint ? '' : 'without-contract'}`}>
+      <ChatSidebar projects={projects} chats={chats} selectedId={currentTask?.id ?? ''} busy={chatActivity}
+        onNew={id => void handleNewChat(id)} onSelect={id => void handleSelectChat(id)}
+        onUpdate={handleUpdateChat} onDelete={handleDeleteChat}
+        onProject={() => { setWorkspacePrompt(false); setQuickProjectOpen(true); }}
+        onSettings={() => openSettings('groups')}
+        onEditProject={project => { startEditProject(project); openSettings('projects'); }} />
 
       <section className="chat-panel">
         <header className="chat-header">
           <div className="chat-title-area">
-            <AgentStrip agents={agents} run={workflowRun} steps={workflowSteps} models={models} activeModel={activeModel} />
+            {messages.length > 0 ? <AgentStrip agents={agents} run={workflowRun} steps={workflowSteps} models={models} activeModel={activeModel} /> : <span className="new-chat-title">{currentTask?.title || 'Новый чат'}</span>}
           </div>
           <div className="chat-header-actions">
             {pendingChanges.length > 0 && (
@@ -1343,8 +1337,7 @@ function App() {
 
           {visibleMessages.length === 0 && !ctfWorkspace && (
             <div className="empty-state">
-              <h3>Поставь первую задачу</h3>
-              <p>Люмен примет ее, уточнит контекст или предложит первый план действий.</p>
+              <h3>С чего начнём?</h3>
             </div>
           )}
 
@@ -1368,13 +1361,13 @@ function App() {
               <MarkdownContent content={message.content} />
             </article>
           ))}
-          {sending && !streamingMessage && (
+          {(sending || (currentTask && chatActivity[currentTask.id] && chatActivity[currentTask.id] !== 'idle')) && !streamingMessage && (
             <article className="message agent pending">
               <div className="message-meta">
                 <span>Люмен</span>
                 <time>сейчас</time>
               </div>
-              <p>Работаю над ответом...</p>
+              <p>{currentTask && chatActivity[currentTask.id] === 'queued' ? 'Ожидает завершения другой задачи проекта' : 'Работаю над ответом...'}</p>
             </article>
           )}
         </div>
@@ -1446,20 +1439,37 @@ function App() {
         )}
 
         <form className="composer" onSubmit={handleSendMessage}>
+          {currentTask?.pendingRequest && <div className="workspace-request">
+            <span>Для выполнения задачи нужна рабочая папка.</span>
+            <div className="workspace-request-actions">
+              <button type="button" onClick={() => { setWorkspacePrompt(true); setQuickProjectName(currentTask.title); setQuickProjectOpen(true); }}><FolderPlus size={16} />Создать рабочую папку</button>
+              <select aria-label="Выбрать существующий проект и продолжить" value="" onChange={e => { if (e.target.value) void attachProject(e.target.value, true).catch(err => setError(errorMessage(err))); }}><option value="">Выбрать проект</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+              {currentProject && <button type="button" onClick={() => void sendChatRequest(currentTask, currentTask.pendingRequest!).catch(err => setError(errorMessage(err)))}>Продолжить</button>}
+            </div>
+          </div>}
+          {currentTask?.status === 'archived' && <div className="workspace-request">Чат в архиве<button type="button" onClick={() => void handleUpdateChat({ ...currentTask, status: 'active' }).catch(err => setError(errorMessage(err)))}>Восстановить</button></div>}
           <textarea
+            ref={composerRef}
             value={messageInput}
             onChange={(event) => setMessageInput(event.target.value)}
             onKeyDown={handleMessageKeyDown}
-            placeholder={clarification ? 'Сначала ответь на уточнение выше' : selectedProjectId ? 'Опиши задачу для AI-завода' : 'Сначала выбери проект'}
-            disabled={!selectedProjectId || sending || Boolean(clarification)}
+            placeholder={clarification ? 'Сначала ответь на уточнение выше' : 'Задача, вопрос или идея...'}
+            disabled={sending || Boolean(clarification) || currentTask?.status === 'archived'}
           />
-          <button className="send-button" type="submit" disabled={!messageInput.trim() || !selectedProjectId || sending || Boolean(clarification)}>
-            Отправить
+          <button className="send-button" type="submit" aria-label="Отправить" title="Отправить" disabled={!messageInput.trim() || sending || Boolean(clarification) || currentTask?.status === 'archived' || Boolean(currentTask && chatActivity[currentTask.id] && chatActivity[currentTask.id] !== 'idle')}>
+            <ArrowUp size={20} />
           </button>
+          <div className="composer-options">
+            <FolderOpen size={15} />
+            <select aria-label="Проект чата" value={selectedProjectId} disabled={Boolean(workflowRun) || sending} onChange={e => void attachProject(e.target.value).catch(err => setError(errorMessage(err)))}><option value="">Без проекта</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+            <button type="button" title="Добавить проект" aria-label="Добавить проект" onClick={() => { setWorkspacePrompt(Boolean(currentTask?.pendingRequest)); setQuickProjectOpen(true); }}><Plus size={16} /></button>
+            <select aria-label="Команда чата" value={currentTask?.groupId || ''} disabled={sending || Boolean(currentTask && chatActivity[currentTask.id] && chatActivity[currentTask.id] !== 'idle')} onChange={e => void setChatPreference('groupId', e.target.value).catch(err => setError(errorMessage(err)))}><option value="">Автовыбор команды</option>{agentGroups.filter(g => g.status !== 'archived').map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select>
+            <select className="composer-model" aria-label="Модель чата" value={currentTask?.modelId || ''} disabled={sending || Boolean(currentTask && chatActivity[currentTask.id] && chatActivity[currentTask.id] !== 'idle')} onChange={e => void setChatPreference('modelId', e.target.value).catch(err => setError(errorMessage(err)))}><option value="">{models.find(m => m.isActive)?.name || 'Модель по умолчанию'}</option>{models.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
+          </div>
         </form>
       </section>
 
-      <aside className="sidebar agents-panel">
+      {blueprint && <aside className="sidebar agents-panel">
         <section className="right-section artifacts-section">
           <div className="panel-heading compact">
             <div>
@@ -1505,7 +1515,16 @@ function App() {
             <p className="panel-note">После постановки задачи здесь появится стек, scaffold и ожидаемые файлы.</p>
           )}
         </section>
-      </aside>
+      </aside>}
+
+      {quickProjectOpen && <div className="chat-modal-backdrop" onClick={() => !quickProjectSaving && setQuickProjectOpen(false)}><form className="chat-dialog" role="dialog" aria-modal="true" aria-label="Рабочая папка" onClick={e => e.stopPropagation()} onSubmit={saveQuickProject}>
+        <div className="chat-nav-heading"><h3>Рабочая папка</h3><button className="icon-button" type="button" aria-label="Закрыть" onClick={() => setQuickProjectOpen(false)}><X size={18} /></button></div>
+        <label>Название<input className="input" autoFocus placeholder={currentTask?.title || 'Новый проект'} value={quickProjectName} onChange={e => setQuickProjectName(e.target.value)} /></label>
+        <label>Существующая папка (необязательно)<input className="input" placeholder="/Users/.../project" value={quickProjectPath} onChange={e => setQuickProjectPath(e.target.value)} /></label>
+        <button type="button" onClick={() => void backend.chooseProjectFolder().then(path => { if (path) setQuickProjectPath(path); }).catch(err => setError(errorMessage(err)))}><FolderOpen size={16} />Выбрать на диске</button>
+        {error && <p className="error-banner">{error}</p>}
+        <button className="primary-button" type="submit" disabled={quickProjectSaving}>{quickProjectPath.trim() ? <FolderOpen size={16} /> : <FolderPlus size={16} />}{quickProjectSaving ? 'Подключаю...' : quickProjectPath.trim() ? 'Подключить папку' : 'Создать папку'}</button>
+      </form></div>}
 
       {settingsOpen && (
         <div className="settings-backdrop" role="presentation" onClick={() => setSettingsOpen(false)}>
@@ -1553,6 +1572,12 @@ function App() {
 
             {settingsTab === 'projects' && (
               <div className="settings-content">
+                {editingProjectId && <form className="inline-form" onSubmit={handleUpdateProject}>
+                  <h3>Изменить проект</h3>
+                  <input className="input" aria-label="Название проекта" value={editingProjectName} onChange={e => setEditingProjectName(e.target.value)} />
+                  <input className="input" aria-label="Путь проекта" value={editingProjectPath} onChange={e => setEditingProjectPath(e.target.value)} />
+                  <div className="chat-dialog-actions"><button type="submit" className="primary-button">Сохранить</button><button type="button" onClick={() => { const project = projects.find(p => p.id === editingProjectId); if (project) void handleDeleteProject(project); }}>{confirmDeleteProjectId === editingProjectId ? 'Подтвердить удаление' : 'Удалить проект'}</button><button type="button" onClick={cancelEditProject}>Отмена</button></div>
+                </form>}
                 <section className="settings-section">
                   <div className="project-actions">
                     <button

@@ -45,6 +45,7 @@ func New(dbPath string) (*Store, error) {
 	}
 
 	store := &Store{db: db}
+	db.SetMaxOpenConns(1)
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -487,7 +488,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	if err := s.migrateChats(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "tasks", "group_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return s.ensureColumn(ctx, "tasks", "model_id", "TEXT NOT NULL DEFAULT ''")
 }
 
 func (s *Store) CreateTaskBlueprint(ctx context.Context, item blueprint.Blueprint) (blueprint.Blueprint, error) {
@@ -851,7 +858,7 @@ func (s *Store) ListProjects(ctx context.Context, query string) ([]project.Proje
 	}
 	defer rows.Close()
 
-	var projects []project.Project
+	projects := []project.Project{}
 	for rows.Next() {
 		var item project.Project
 		if err := rows.Scan(&item.ID, &item.Name, &item.Path, &item.CreatedAt, &item.LastOpenedAt); err != nil {
@@ -927,7 +934,7 @@ func (s *Store) TouchProject(ctx context.Context, id string) error {
 func (s *Store) GetActiveTask(ctx context.Context, projectID string) (*chat.Task, error) {
 	var item chat.Task
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, project_id, title, status, created_at, updated_at
+		SELECT id, COALESCE(project_id, ''), title, status, created_at, updated_at
 		FROM tasks
 		WHERE project_id = ? AND status = 'active'
 		ORDER BY created_at DESC
@@ -958,7 +965,7 @@ func (s *Store) CreateTask(ctx context.Context, projectID string, title string) 
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tasks (id, project_id, title, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES (?, NULLIF(?, ''), ?, ?, ?, ?)
 	`, item.ID, item.ProjectID, item.Title, item.Status, item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return chat.Task{}, err
@@ -2959,6 +2966,9 @@ func (s *Store) BindProjectToAgentGroup(ctx context.Context, projectID string, g
 }
 
 func (s *Store) ProjectGroupBinding(ctx context.Context, projectID string) (agentgroups.ProjectBinding, error) {
+	if binding, ok := agentgroups.RuntimeBinding(ctx); ok && binding.ProjectID == projectID {
+		return binding, nil
+	}
 	var item agentgroups.ProjectBinding
 	var isDefault int
 	err := s.db.QueryRowContext(ctx, `
@@ -3008,6 +3018,7 @@ func (s *Store) EnsureDefaultProjectGroupBindings(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	rows.Close()
 	for _, projectID := range projectIDs {
 		if _, err := s.BindProjectToAgentGroup(ctx, projectID, "group_dev_squad", "lifecycle_dev_default"); err != nil {
 			return err

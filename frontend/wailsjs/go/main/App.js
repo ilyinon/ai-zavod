@@ -30,6 +30,10 @@ export function CheckModel(arg1) {
   return window['go']['main']['App']['CheckModel'](arg1);
 }
 
+export function ChooseProjectFolder() {
+  return window['go']['main']['App']['ChooseProjectFolder']();
+}
+
 export function CreateAgentGroup(arg1) {
   return window['go']['main']['App']['CreateAgentGroup'](arg1);
 }
@@ -38,8 +42,16 @@ export function CreateAgentGroupFromTemplate(arg1) {
   return window['go']['main']['App']['CreateAgentGroupFromTemplate'](arg1);
 }
 
+export function CreateChat(arg1) {
+  return window['go']['main']['App']['CreateChat'](arg1);
+}
+
 export function CreateProject(arg1) {
   return window['go']['main']['App']['CreateProject'](arg1);
+}
+
+export function DeleteChat(arg1) {
+  return window['go']['main']['App']['DeleteChat'](arg1);
 }
 
 export function DeleteLifecycleStep(arg1) {
@@ -72,6 +84,10 @@ export function ListAgentLibrary() {
 
 export function ListAgentProfiles(arg1) {
   return window['go']['main']['App']['ListAgentProfiles'](arg1);
+}
+
+export function ListChats() {
+  return window['go']['main']['App']['ListChats']();
 }
 
 export function ListLifecycleDefinitions(arg1) {
@@ -126,6 +142,10 @@ export function SaveWebSettings(arg1) {
   return window['go']['main']['App']['SaveWebSettings'](arg1);
 }
 
+export function SelectChat(arg1) {
+  return window['go']['main']['App']['SelectChat'](arg1);
+}
+
 export function SelectProject(arg1) {
   return window['go']['main']['App']['SelectProject'](arg1);
 }
@@ -148,6 +168,10 @@ export function SubmitClarification(arg1) {
 
 export function UpdateAgentGroup(arg1) {
   return window['go']['main']['App']['UpdateAgentGroup'](arg1);
+}
+
+export function UpdateChat(arg1) {
+  return window['go']['main']['App']['UpdateChat'](arg1);
 }
 
 export function UpdateProject(arg1) {

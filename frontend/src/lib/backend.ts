@@ -14,6 +14,10 @@ export type Project = {
 };
 
 export type Task = {
+	 groupId: string;
+	 modelId: string;
+	 pinned: boolean;
+	 pendingRequest?: string;
   id: string;
   projectId: string;
   title: string;
@@ -503,6 +507,7 @@ export type ChatState = ProjectState & {
 };
 
 export type BootstrapState = {
+	 chats: Task[];
   paths: AppPaths;
   projects: Project[];
   selectedProjectId: string;
@@ -517,6 +522,12 @@ export type BootstrapState = {
 };
 
 type WailsApp = {
+  ChooseProjectFolder(): Promise<string>;
+  ListChats(): Promise<Task[]>;
+  CreateChat(input: { projectId: string }): Promise<ProjectState>;
+  SelectChat(id: string): Promise<ProjectState>;
+  UpdateChat(input: { taskId: string; title: string; projectId: string; pinned: boolean; archived: boolean; groupId: string; modelId: string }): Promise<Task>;
+  DeleteChat(id: string): Promise<void>;
   Bootstrap(): Promise<BootstrapState>;
   ListProjects(query: string): Promise<Project[]>;
   CreateProject(input: { name: string; groupId: string; lifecycleId: string }): Promise<Project>;
@@ -524,7 +535,7 @@ type WailsApp = {
   UpdateProject(input: { projectId: string; name: string; path: string }): Promise<Project>;
   DeleteProject(input: { projectId: string }): Promise<BootstrapState>;
   SelectProject(projectId: string): Promise<ProjectState>;
-  SendMessage(input: { projectId: string; content: string }): Promise<ChatState>;
+  SendMessage(input: { projectId: string; taskId: string; content: string }): Promise<ChatState>;
   SubmitClarification(input: { projectId: string; workflowRunId: string; answers: ClarificationAnswer[] }): Promise<ChatState>;
   ApplyWorkflowChanges(input: { projectId: string; workflowRunId: string }): Promise<ChatState>;
   RollbackWorkflowChanges(input: { projectId: string; workflowRunId: string }): Promise<ChatState>;
@@ -607,7 +618,13 @@ export const backend = {
   updateProject: (projectId: string, name: string, path: string) => app().UpdateProject({ projectId, name, path }),
   deleteProject: (projectId: string) => app().DeleteProject({ projectId }),
   selectProject: (projectId: string) => app().SelectProject(projectId),
-  sendMessage: (projectId: string, content: string) => app().SendMessage({ projectId, content }),
+  listChats: () => app().ListChats(),
+  chooseProjectFolder: () => app().ChooseProjectFolder(),
+  createChat: (projectId = '') => app().CreateChat({ projectId }),
+  selectChat: (id: string) => app().SelectChat(id),
+  updateChat: (task: Task) => app().UpdateChat({ taskId: task.id, title: task.title, projectId: task.projectId, pinned: task.pinned, archived: task.status === 'archived', groupId: task.groupId || '', modelId: task.modelId || '' }),
+  deleteChat: (id: string) => app().DeleteChat(id),
+  sendMessage: (projectId: string, content: string, taskId = '') => app().SendMessage({ projectId, content, taskId }),
   submitClarification: (projectId: string, workflowRunId: string, answers: ClarificationAnswer[]) =>
     app().SubmitClarification({ projectId, workflowRunId, answers }),
   applyWorkflowChanges: (projectId: string, workflowRunId: string) =>
@@ -673,6 +690,8 @@ export const backend = {
     subscribe('agent_status_changed', (data) => callback(data as AgentStatus)),
   onChatStateChanged: (callback: (state: ChatState) => void) =>
     subscribe('chat_state_changed', (data) => callback(data as ChatState)),
+  onChatActivity: (callback: (activity: { taskId: string; status: string }) => void) =>
+    subscribe('chat_activity', (data) => callback(data as { taskId: string; status: string })),
   onAgentMessageDelta: (callback: (delta: AgentMessageDelta) => void) =>
     subscribe('agent_message_delta', (data) => callback(data as AgentMessageDelta)),
   onWorkflowRunChanged: (callback: (run: WorkflowRun) => void) =>

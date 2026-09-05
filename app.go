@@ -43,6 +43,41 @@ func (a *App) ListProjects(query string) ([]appsvc.ProjectDTO, error) {
 	return a.service.ListProjects(a.ctx, query)
 }
 
+func (a *App) ListChats() ([]appsvc.TaskDTO, error) {
+	if err := a.ready(); err != nil {
+		return nil, err
+	}
+	return a.service.ListChats(a.ctx)
+}
+
+func (a *App) ChooseProjectFolder() (string, error) {
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: "Выбрать рабочую папку"})
+}
+func (a *App) CreateChat(input appsvc.CreateChatInput) (appsvc.ProjectState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ProjectState{}, err
+	}
+	return a.service.CreateChat(a.ctx, input)
+}
+func (a *App) SelectChat(id string) (appsvc.ProjectState, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.ProjectState{}, err
+	}
+	return a.service.SelectChat(a.ctx, id)
+}
+func (a *App) UpdateChat(input appsvc.UpdateChatInput) (appsvc.TaskDTO, error) {
+	if err := a.ready(); err != nil {
+		return appsvc.TaskDTO{}, err
+	}
+	return a.service.UpdateChat(a.ctx, input)
+}
+func (a *App) DeleteChat(id string) error {
+	if err := a.ready(); err != nil {
+		return err
+	}
+	return a.service.DeleteChat(a.ctx, id)
+}
+
 func (a *App) CreateProject(input appsvc.CreateProjectInput) (appsvc.ProjectDTO, error) {
 	if err := a.ready(); err != nil {
 		return appsvc.ProjectDTO{}, err

@@ -4,6 +4,7 @@ import {app} from '../models';
 import {agentgroups} from '../models';
 import {project} from '../models';
 import {llm} from '../models';
+import {chat} from '../models';
 import {webresearch} from '../models';
 
 export function AddAgentFromLibrary(arg1:app.AddAgentFromLibraryInput):Promise<Array<agentgroups.Profile>>;
@@ -20,11 +21,17 @@ export function Bootstrap():Promise<app.BootstrapState>;
 
 export function CheckModel(arg1:string):Promise<Array<llm.ModelConfig>>;
 
+export function ChooseProjectFolder():Promise<string>;
+
 export function CreateAgentGroup(arg1:app.CreateAgentGroupInput):Promise<Array<agentgroups.Group>>;
 
 export function CreateAgentGroupFromTemplate(arg1:app.CreateAgentGroupFromTemplateInput):Promise<Array<agentgroups.Group>>;
 
+export function CreateChat(arg1:app.CreateChatInput):Promise<app.ProjectState>;
+
 export function CreateProject(arg1:app.CreateProjectInput):Promise<project.Project>;
+
+export function DeleteChat(arg1:string):Promise<void>;
 
 export function DeleteLifecycleStep(arg1:app.DeleteLifecycleStepInput):Promise<Array<agentgroups.LifecycleStep>>;
 
@@ -41,6 +48,8 @@ export function ListAgentGroups():Promise<Array<agentgroups.Group>>;
 export function ListAgentLibrary():Promise<Array<app.AgentLibraryItemDTO>>;
 
 export function ListAgentProfiles(arg1:string):Promise<Array<agentgroups.Profile>>;
+
+export function ListChats():Promise<Array<chat.Task>>;
 
 export function ListLifecycleDefinitions(arg1:string):Promise<Array<agentgroups.LifecycleDefinition>>;
 
@@ -68,6 +77,8 @@ export function SaveModelConfig(arg1:app.SaveModelConfigInput):Promise<Array<llm
 
 export function SaveWebSettings(arg1:app.SaveWebSettingsInput):Promise<webresearch.Settings>;
 
+export function SelectChat(arg1:string):Promise<app.ProjectState>;
+
 export function SelectProject(arg1:string):Promise<app.ProjectState>;
 
 export function SendMessage(arg1:app.SendMessageInput):Promise<app.ChatState>;
@@ -79,5 +90,7 @@ export function SetAgentProfileEnabled(arg1:app.SetAgentProfileEnabledInput):Pro
 export function SubmitClarification(arg1:app.SubmitClarificationInput):Promise<app.ChatState>;
 
 export function UpdateAgentGroup(arg1:app.UpdateAgentGroupInput):Promise<Array<agentgroups.Group>>;
+
+export function UpdateChat(arg1:app.UpdateChatInput):Promise<chat.Task>;
 
 export function UpdateProject(arg1:app.UpdateProjectInput):Promise<project.Project>;
