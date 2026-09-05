@@ -342,6 +342,30 @@ CTF Cell должен выбирать инструменты по катего�
 - Final/completion criteria завершают workflow.
 - Старые lifecycle без JSON config продолжают работать как раньше.
 
+## V1.0.1 - Visual Lifecycle Editor
+
+### Цель
+
+Дать пользователю визуальный редактор pipeline: карточки шагов, видимые переходы, retry/required/mode/agent на одном экране.
+
+### Фичи
+
+- Visual graph поверх существующих `LifecycleStep`.
+- Карточки шагов с title, step key, агентом, role, mode, required/optional, retry policy, visible/hidden и gate marker.
+- Success/failure/return/branch/parallel/join links из `on_success_step_key`, `on_failure_step_key` и runtime JSON.
+- Runtime validation issues показываются рядом с графом и подсвечивают проблемные карточки.
+- Клик по карточке открывает форму редактирования шага.
+- Удаление шага доступно из карточки.
+- Горизонтальный scroll для длинных lifecycle.
+
+### Acceptance Criteria
+
+- Пользователь видит pipeline без наведения и без чтения JSON.
+- Можно понять, какой агент выполняет каждый шаг.
+- Можно понять, куда workflow вернется при ошибке.
+- Можно увидеть retries и required/optional прямо на карточке.
+- Сохранение продолжает использовать старый backend contract, без новой несовместимой схемы.
+
 ## V0.7.0 - Task Memory & Spec Store
 
 ### Цель

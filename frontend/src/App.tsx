@@ -13,6 +13,7 @@ import {
   CTFWorkspaceFile,
   CTFWorkspaceSection,
   LifecycleDefinition,
+  LifecycleRuntimeIssue,
   LifecycleStep,
   Message,
   ModelConfig,
@@ -213,6 +214,7 @@ function App() {
   const [groupProfiles, setGroupProfiles] = useState<AgentProfile[]>([]);
   const [groupLifecycles, setGroupLifecycles] = useState<LifecycleDefinition[]>([]);
   const [lifecycleSteps, setLifecycleSteps] = useState<LifecycleStep[]>([]);
+  const [lifecycleRuntimeIssues, setLifecycleRuntimeIssues] = useState<LifecycleRuntimeIssue[]>([]);
   const [selectedLifecycleId, setSelectedLifecycleId] = useState('');
   const [lifecycleForm, setLifecycleForm] = useState<LifecycleDefinition | null>(null);
   const [lifecycleStepForm, setLifecycleStepForm] = useState<LifecycleStep | null>(null);
@@ -736,6 +738,7 @@ function App() {
       setGroupProfiles([]);
       setGroupLifecycles([]);
       setLifecycleSteps([]);
+      setLifecycleRuntimeIssues([]);
       setSelectedLifecycleId('');
       setLifecycleForm(null);
       setLifecycleStepForm(null);
@@ -762,11 +765,17 @@ function App() {
       if (lifecycleID) {
         setSelectedLifecycleId(lifecycleID);
         setLifecycleForm(lifecycles.find((item) => item.id === lifecycleID) ?? lifecycles[0] ?? null);
-        setLifecycleSteps(await backend.listLifecycleSteps(lifecycleID));
+        const [steps, issues] = await Promise.all([
+          backend.listLifecycleSteps(lifecycleID),
+          backend.validateLifecycleRuntime(lifecycleID),
+        ]);
+        setLifecycleSteps(steps);
+        setLifecycleRuntimeIssues(issues);
       } else {
         setSelectedLifecycleId('');
         setLifecycleForm(null);
         setLifecycleSteps([]);
+        setLifecycleRuntimeIssues([]);
       }
       setAgentForm(null);
       setSoulEditor(null);
@@ -783,6 +792,7 @@ function App() {
     setLibraryTargetProfileId('');
     setGroupLifecycles([]);
     setLifecycleSteps([]);
+    setLifecycleRuntimeIssues([]);
     setSelectedLifecycleId('');
     setLifecycleForm(null);
     setLifecycleStepForm(null);
@@ -1019,7 +1029,17 @@ function App() {
     setLifecycleStepForm(null);
     setError('');
     try {
-      setLifecycleSteps(lifecycleId ? await backend.listLifecycleSteps(lifecycleId) : []);
+      if (!lifecycleId) {
+        setLifecycleSteps([]);
+        setLifecycleRuntimeIssues([]);
+        return;
+      }
+      const [steps, issues] = await Promise.all([
+        backend.listLifecycleSteps(lifecycleId),
+        backend.validateLifecycleRuntime(lifecycleId),
+      ]);
+      setLifecycleSteps(steps);
+      setLifecycleRuntimeIssues(issues);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -1039,7 +1059,12 @@ function App() {
       if (saved) {
         setSelectedLifecycleId(saved.id);
         setLifecycleForm(saved);
-        setLifecycleSteps(await backend.listLifecycleSteps(saved.id));
+        const [steps, issues] = await Promise.all([
+          backend.listLifecycleSteps(saved.id),
+          backend.validateLifecycleRuntime(saved.id),
+        ]);
+        setLifecycleSteps(steps);
+        setLifecycleRuntimeIssues(issues);
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -1077,6 +1102,7 @@ function App() {
     try {
       const updated = await backend.saveLifecycleStep(lifecycleStepForm);
       setLifecycleSteps(updated);
+      setLifecycleRuntimeIssues(await backend.validateLifecycleRuntime(lifecycleStepForm.lifecycleId));
       setLifecycleStepForm(null);
     } catch (err) {
       setError(errorMessage(err));
@@ -1090,6 +1116,7 @@ function App() {
     try {
       const updated = await backend.deleteLifecycleStep(step.id, step.lifecycleId);
       setLifecycleSteps(updated);
+      setLifecycleRuntimeIssues(await backend.validateLifecycleRuntime(step.lifecycleId));
       if (lifecycleStepForm?.id === step.id) {
         setLifecycleStepForm(null);
       }
@@ -2159,30 +2186,14 @@ function App() {
                     </div>
                   )}
 
-                  <div className="lifecycle-preview-list">
-                    {lifecycleSteps.map((step, index) => {
-                      const profile = groupProfiles.find((item) => item.id === step.agentProfileId);
-                      return (
-                        <div key={step.id} className={`lifecycle-preview-item ${step.required ? '' : 'optional'}`}>
-                          <span>{index + 1}</span>
-                          <div>
-                            <strong>{step.title}</strong>
-                            <p>{profile?.name ?? 'агент не назначен'} · {step.mode} · {step.canRetry ? `retry ${step.maxRetries}` : 'без retry'}</p>
-                            {step.onFailureStepKey && <p>при ошибке → {step.onFailureStepKey}</p>}
-                          </div>
-                          <div className="lifecycle-item-actions">
-                            <button className="small-button secondary" type="button" onClick={() => setLifecycleStepForm(step)}>
-                              Править
-                            </button>
-                            <button className="small-button danger" type="button" onClick={() => void handleDeleteLifecycleStep(step)}>
-                              Удалить
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {lifecycleSteps.length === 0 && <p className="panel-note">В lifecycle пока нет шагов.</p>}
-                  </div>
+                  <LifecycleVisualEditor
+                    steps={lifecycleSteps}
+                    profiles={groupProfiles}
+                    issues={lifecycleRuntimeIssues}
+                    selectedStepId={lifecycleStepForm?.id ?? ''}
+                    onEdit={(step) => setLifecycleStepForm(step)}
+                    onDelete={(step) => void handleDeleteLifecycleStep(step)}
+                  />
 
                   {lifecycleStepForm && (
                     <form className="lifecycle-step-form" onSubmit={handleSaveLifecycleStep}>
@@ -3031,6 +3042,113 @@ function DiffViewer({ diffText }: { diffText: string }) {
         </span>
       ))}
     </pre>
+  );
+}
+
+function LifecycleVisualEditor({
+  steps,
+  profiles,
+  issues,
+  selectedStepId,
+  onEdit,
+  onDelete,
+}: {
+  steps: LifecycleStep[];
+  profiles: AgentProfile[];
+  issues: LifecycleRuntimeIssue[];
+  selectedStepId: string;
+  onEdit: (step: LifecycleStep) => void;
+  onDelete: (step: LifecycleStep) => void;
+}) {
+  const orderedSteps = sortedLifecycleSteps(steps);
+  const issueCountByStep = lifecycleIssueCountByStep(issues);
+
+  if (orderedSteps.length === 0) {
+    return <p className="panel-note">В lifecycle пока нет шагов.</p>;
+  }
+
+  return (
+    <div className="lifecycle-visual-editor">
+      <div className="lifecycle-visual-header">
+        <div>
+          <strong>{orderedSteps.length} шагов</strong>
+          <span>{issues.length > 0 ? `есть замечания: ${issues.length}` : 'runtime валиден'}</span>
+        </div>
+        <span className={`lifecycle-runtime-pill ${issues.length > 0 ? 'warning' : 'ok'}`}>
+          {issues.length > 0 ? 'проверить связи' : 'готово'}
+        </span>
+      </div>
+      <div className="lifecycle-flow-track" role="list" aria-label="Визуальный lifecycle">
+        {orderedSteps.map((step, index) => {
+          const profile = profiles.find((item) => item.id === step.agentProfileId);
+          const runtime = lifecycleRuntimeConfig(step);
+          const links = lifecycleLinksForStep(step, index, orderedSteps, runtime);
+          const stepIssues = issueCountByStep.get(step.stepKey) ?? 0;
+          return (
+            <article
+              key={step.id || step.stepKey}
+              className={`lifecycle-node ${step.required ? '' : 'optional'} ${selectedStepId === step.id ? 'selected' : ''} ${stepIssues > 0 ? 'has-issues' : ''}`}
+              role="listitem"
+              tabIndex={0}
+              onClick={() => onEdit(step)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onEdit(step);
+                }
+              }}
+            >
+              <div className="lifecycle-node-main">
+                <span className="lifecycle-node-index">{index + 1}</span>
+                <div className="lifecycle-node-copy">
+                  <div className="lifecycle-node-title">
+                    <strong>{step.title}</strong>
+                    <span>{step.mode}</span>
+                  </div>
+                  <p>{profile?.name ?? 'агент не назначен'} · {profile?.roleKey || 'role не задан'}</p>
+                  <code>{step.stepKey}</code>
+                </div>
+              </div>
+              <div className="lifecycle-node-badges">
+                <span className={step.required ? 'required' : 'optional'}>{step.required ? 'required' : 'optional'}</span>
+                <span>{step.canRetry ? `retry ${step.maxRetries}` : 'no retry'}</span>
+                {!step.visibleToUser && <span>hidden</span>}
+                {runtime.humanGate && <span>gate</span>}
+                {stepIssues > 0 && <span className="warning">{stepIssues} issues</span>}
+              </div>
+              {links.length > 0 && (
+                <div className="lifecycle-node-links">
+                  {links.map((link, linkIndex) => (
+                    <span key={`${link.kind}-${link.to}-${linkIndex}`} className={`lifecycle-edge ${link.kind}`}>
+                      <span>{link.label}</span>
+                      <strong>{link.to}</strong>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="lifecycle-node-actions">
+                <button className="small-button secondary" type="button" onClick={(event) => { event.stopPropagation(); onEdit(step); }}>
+                  Править
+                </button>
+                <button className="small-button danger" type="button" onClick={(event) => { event.stopPropagation(); onDelete(step); }}>
+                  Удалить
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      {issues.length > 0 && (
+        <div className="lifecycle-runtime-issues">
+          {issues.map((issue, index) => (
+            <p key={`${issue.stepKey}-${issue.field}-${index}`}>
+              <strong>{issue.stepKey || 'lifecycle'}</strong>
+              <span>{issue.field}: {issue.message}</span>
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -4135,6 +4253,124 @@ function groupKindLabel(kind: string): string {
     default:
       return 'кастомная';
   }
+}
+
+type LifecycleRuntimeConfig = {
+  returnTo?: string;
+  returnToStepKey?: string;
+  return_to?: string;
+  join?: string;
+  joinStepKey?: string;
+  parallel?: string[];
+  parallelSteps?: string[];
+  branches?: Array<{
+    next?: string;
+    nextStepKey?: string;
+    default?: boolean;
+  }>;
+  humanGate?: {
+    reason?: string;
+    requiredInputs?: string[];
+  };
+};
+
+type LifecycleLink = {
+  kind: 'success' | 'failure' | 'return' | 'branch' | 'parallel' | 'join';
+  label: string;
+  to: string;
+};
+
+function sortedLifecycleSteps(steps: LifecycleStep[]): LifecycleStep[] {
+  return [...steps].sort((a, b) => {
+    if (a.sortOrder === b.sortOrder) {
+      return a.stepKey.localeCompare(b.stepKey);
+    }
+    return a.sortOrder - b.sortOrder;
+  });
+}
+
+function lifecycleIssueCountByStep(issues: LifecycleRuntimeIssue[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const issue of issues) {
+    const key = issue.stepKey || 'lifecycle';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function lifecycleRuntimeConfig(step: LifecycleStep): LifecycleRuntimeConfig {
+  const raw = step.outputSchema.trim();
+  if (!raw.startsWith('{')) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as LifecycleRuntimeConfig;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function lifecycleLinksForStep(
+  step: LifecycleStep,
+  index: number,
+  orderedSteps: LifecycleStep[],
+  runtime: LifecycleRuntimeConfig,
+): LifecycleLink[] {
+  const nextStep = orderedSteps[index + 1];
+  const links: LifecycleLink[] = [];
+  const successTarget = firstNonEmptyString(step.onSuccessStepKey, nextStep?.stepKey ?? '');
+  if (successTarget) {
+    links.push({ kind: 'success', label: step.onSuccessStepKey ? 'success' : 'next', to: successTarget });
+  }
+  const returnTarget = firstNonEmptyString(runtime.returnToStepKey ?? '', runtime.returnTo ?? '', runtime.return_to ?? '');
+  const failureTarget = firstNonEmptyString(step.onFailureStepKey, returnTarget);
+  if (failureTarget) {
+    links.push({ kind: 'failure', label: 'failure', to: failureTarget });
+  }
+  if (returnTarget && returnTarget !== failureTarget) {
+    links.push({ kind: 'return', label: 'return', to: returnTarget });
+  }
+  for (const target of normalizedLifecycleTargets([...(runtime.parallelSteps ?? []), ...(runtime.parallel ?? [])])) {
+    links.push({ kind: 'parallel', label: 'parallel', to: target });
+  }
+  const joinTarget = firstNonEmptyString(runtime.joinStepKey ?? '', runtime.join ?? '');
+  if (joinTarget) {
+    links.push({ kind: 'join', label: 'join', to: joinTarget });
+  }
+  for (const branch of runtime.branches ?? []) {
+    const target = firstNonEmptyString(branch.nextStepKey ?? '', branch.next ?? '');
+    if (target) {
+      links.push({ kind: 'branch', label: branch.default ? 'default' : 'branch', to: target });
+    }
+  }
+  return dedupeLifecycleLinks(links);
+}
+
+function normalizedLifecycleTargets(targets: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const target of targets) {
+    const value = target.trim();
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function dedupeLifecycleLinks(links: LifecycleLink[]): LifecycleLink[] {
+  const seen = new Set<string>();
+  return links.filter((link) => {
+    const key = `${link.kind}:${link.label}:${link.to}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function defaultProjectGroupId(groups: AgentGroup[]): string {

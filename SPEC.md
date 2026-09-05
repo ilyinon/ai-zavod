@@ -262,6 +262,47 @@ Acceptance criteria:
 - `final` и `completion` rules умеют завершать workflow;
 - frontend editor поддерживает modes `branch`, `parallel`, `join`.
 
+## V1.0.1 - Visual Lifecycle Editor
+
+Lifecycle editor должен показывать кастомный pipeline как визуальный граф, а не только как форму и плоский список. Пользователь должен быстро видеть, кто выполняет шаг, какой у шага режим, можно ли его повторять, обязательный он или нет, и куда workflow пойдет при успехе/ошибке/ветвлении.
+
+Source of truth:
+
+- визуальный редактор использует существующие `LifecycleStep` записи;
+- переходы берутся из `on_success_step_key`, `on_failure_step_key` и runtime JSON в `output_schema`;
+- отдельная UI-only схема lifecycle не создается;
+- редактирование карточки открывает существующую форму шага, чтобы не было двух разных способов сохранить разные данные.
+
+Карточка шага показывает:
+
+- номер в sort order;
+- title и `step_key`;
+- назначенного агента и role key;
+- mode: `llm`, `tool`, `checks`, `review`, `artifact`, `final`, `human_gate`, `branch`, `parallel`, `join`;
+- `required` или `optional`;
+- retry policy: `retry N` или `no retry`;
+- скрыт ли шаг из хода работы;
+- human gate marker, если есть `humanGate`;
+- validation issues по этому шагу.
+
+Связи:
+
+- default next стрелка идет к следующему шагу по sort order;
+- success стрелка идет к `on_success_step_key`, если он задан;
+- failure стрелка идет к `on_failure_step_key` или `returnTo`;
+- branch стрелки читаются из `branches[].next` / `branches[].nextStepKey`;
+- parallel стрелки читаются из `parallel` / `parallelSteps`;
+- join стрелка читается из `join` / `joinStepKey`.
+
+Acceptance criteria:
+
+- в настройках группы есть визуальный блок lifecycle с карточками шагов;
+- карточка шага открывает редактирование шага;
+- из карточки можно удалить шаг;
+- UI показывает mode, agent, retries, required/optional и runtime links;
+- runtime validation issues видны рядом с графом;
+- старый lifecycle editor остается совместимым и сохраняет те же `LifecycleStep`.
+
 ## Цель
 
 Локальное macOS desktop-приложение для управления AI-агентами через чат. Пользователь выбирает проект, пишет задачу, а входной агент "Люмен" принимает ее и отвечает через выбранную модель.
