@@ -898,7 +898,7 @@ func TestCreateAgentGroupFromTemplateCreatesEditableCopy(t *testing.T) {
 	}
 }
 
-func TestRunV03RuntimeLifecycleFollowsBranchAndReturn(t *testing.T) {
+func TestRunV03RuntimeLifecycleStopsReturnAtStepBudget(t *testing.T) {
 	reviewFailure := errors.New("review failed")
 	executor := lifecycler.NewExecutor(agentgroups.LifecycleDefinition{MaxRepairIterations: 1}, []agentgroups.LifecycleStep{
 		{
@@ -937,12 +937,12 @@ func TestRunV03RuntimeLifecycleFollowsBranchAndReturn(t *testing.T) {
 		}
 		return "ok", nil
 	}, executor)
-	if err != nil {
-		t.Fatalf("run runtime lifecycle: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "review failed") {
+		t.Fatalf("expected bounded return preserving review failure: %v", err)
 	}
 	joined := strings.Join(calls, ",")
-	if !strings.Contains(joined, zw.StepDeveloperPlan+","+zw.StepReview+","+zw.StepReview+","+zw.StepDeveloperPlan+","+zw.StepReview) {
-		t.Fatalf("expected review to return to developer, calls=%v", calls)
+	if joined != zw.StepDeveloperPlan+","+zw.StepReview {
+		t.Fatalf("return must not bypass MaxRetries=0, calls=%v", calls)
 	}
 }
 

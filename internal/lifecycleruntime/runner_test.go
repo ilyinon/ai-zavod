@@ -55,13 +55,14 @@ func TestRunnerRetriesThenReturns(t *testing.T) {
 
 	result, err := runner.Run(context.Background(), lifecycler.RuntimeState{})
 	if err == nil {
-		t.Fatal("expected max turn error because review keeps returning to develop")
+		t.Fatal("expected a bounded stop because review keeps returning to develop")
 	}
-	if result.Status != zw.StatusBlocked {
-		t.Fatalf("expected blocked by max turns, got %#v", result)
+	var stop *StopError
+	if !errors.As(err, &stop) || stop.Kind != "step_budget" || stop.Cause != "needs work" {
+		t.Fatalf("expected step budget with root cause, got %#v %v", result, err)
 	}
-	if calls["review"] < 2 || calls["develop"] < 2 {
-		t.Fatalf("expected retry/return loop, got calls %#v", calls)
+	if calls["review"] != 1 || calls["develop"] != 1 {
+		t.Fatalf("return bypassed execution limit: %#v", calls)
 	}
 }
 

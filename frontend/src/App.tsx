@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, MouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, MouseEvent, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, X, ArrowUp, Plus } from 'lucide-react';
 import { ChatSidebar } from './ChatSidebar';
 import { ToolActivity } from './ToolActivity';
@@ -220,6 +220,10 @@ function App() {
   const [workflowRun, setWorkflowRun] = useState<WorkflowRun | null>(null);
   const [workflowSteps, setWorkflowSteps] = useState<WorkflowStep[]>([]);
   const [workflowPlan, setWorkflowPlan] = useState<WorkflowPlan | null>(null);
+  const [requestState, setRequestState] = useState<ProjectState['requestState']>();
+  const [workflowFailure, setWorkflowFailure] = useState<ProjectState['workflowFailure']>();
+  const requestSequences = useRef<Record<string, number>>({});
+  const projectionRevisions = useRef<Record<string, string>>({});
   const [planSteps, setPlanSteps] = useState<WorkflowPlanStep[]>([]);
   const [blueprint, setBlueprint] = useState<TaskBlueprint | null>(null);
   const [clarification, setClarification] = useState<PendingClarification | null>(null);
@@ -303,22 +307,12 @@ function App() {
     const offChat = backend.onChatStateChanged((state) => {
       if (state.task) setChats(previous => upsertChat(previous, state.task!));
       if (state.task?.id !== selectedChatRef.current) return;
-      applyChatState(state);
-      setAgents(state.agents);
+      if (!applyChatState(state)) return;
       if (state.error) {
         setError(state.error);
       }
     });
     const offDelta = backend.onAgentMessageDelta(handleAgentMessageDelta);
-    const offWorkflowRun = backend.onWorkflowRunChanged((run) => {
-      if (run.taskId !== selectedChatRef.current) return;
-      selectedRunRef.current = run.id;
-      setWorkflowRun(run);
-    });
-    const offWorkflowStep = backend.onWorkflowStepChanged((step) => {
-      if (step.workflowRunId !== selectedRunRef.current) return;
-      setWorkflowSteps((previous) => upsertWorkflowStep(previous, step));
-    });
     const offActivity = backend.onChatActivity(activity => setChatActivity(previous => ({ ...previous, [activity.taskId]: activity.status })));
     const offModels = backend.onModelsChanged((nextModels) => {
       setModels(nextModels);
@@ -332,8 +326,6 @@ function App() {
       offChat();
       offActivity();
       offDelta();
-      offWorkflowRun();
-      offWorkflowStep();
       offModels();
     };
   }, []);
@@ -442,6 +434,15 @@ function App() {
   }
 
   function applyProjectState(state: ProjectState) {
+    const taskId = state.task?.id ?? '';
+    const sequence = state.requestState?.sequence ?? 0;
+    if (sequence < (requestSequences.current[taskId] ?? 0)) return false;
+    if (sequence === (requestSequences.current[taskId] ?? 0) && state.projectionRevision && state.projectionRevision < (projectionRevisions.current[taskId] ?? '')) return false;
+    requestSequences.current[taskId] = sequence;
+    projectionRevisions.current[taskId] = state.projectionRevision ?? '';
+    setRequestState(state.requestState);
+    const showPlan = !state.requestState || (state.requestState.mode === 'workflow' && state.requestState.workflowRunId === state.workflowRun?.id);
+    setWorkflowFailure(showPlan ? state.workflowFailure : undefined);
     if (selectedChatRef.current !== (state.task?.id ?? '')) { setStreamingMessage(null); setSending(false); }
     selectedChatRef.current = state.task?.id ?? '';
     selectedRunRef.current = state.workflowRun?.id ?? '';
@@ -449,22 +450,25 @@ function App() {
     setCurrentProject(state.project?.id ? state.project : null);
     setSelectedProjectId(state.project?.id ?? '');
     setMessages(state.messages ?? []);
-    setWorkflowRun(state.workflowRun ?? null);
-    setWorkflowSteps(state.workflowSteps ?? []);
-    setWorkflowPlan(state.workflowPlan ?? null);
-    setPlanSteps(state.planSteps ?? []);
+    setWorkflowRun(showPlan ? state.workflowRun ?? null : null);
+    setWorkflowSteps(showPlan ? state.workflowSteps ?? [] : []);
+    setWorkflowPlan(showPlan ? state.workflowPlan ?? null : null);
+    setPlanSteps(showPlan ? state.planSteps ?? [] : []);
     setBlueprint(state.blueprint ?? null);
-    setClarification(state.clarification ?? null);
+    setClarification(showPlan ? state.clarification ?? null : null);
     setChanges(state.changes ?? []);
     setWebSources(state.webSources ?? []);
     setToolInvocations((state.toolInvocations ?? []).filter(item => item.taskId === state.task?.id));
     setCTFWorkspace(state.ctfWorkspace ?? null);
     setCurrentAgentGroup(state.agentGroup ?? null);
     setGroupBinding(state.groupBinding ?? null);
+    return true;
   }
 
   function applyChatState(state: ChatState) {
-    applyProjectState(state);
+    const accepted = applyProjectState(state);
+    if (accepted) setAgents(state.agents);
+    return accepted;
   }
 
   function handleAgentMessageDelta(delta: AgentMessageDelta) {
@@ -643,14 +647,14 @@ function App() {
     }
   }
 
-  async function sendChatRequest(task: Task, content: string) {
+  async function sendChatRequest(task: Task, content: string, routingAnswerFor = '', resumeWorkflowRunId = '') {
     const consentModelId = toolConsent === toolConsentKey ? toolModel?.id || '' : '';
     setToolConsent('');
     setChatActivity(previous => ({ ...previous, [task.id]: 'running' }));
     try {
-      const state = await backend.sendMessage(task.projectId, content, task.id, consentModelId);
+      const state = await backend.sendMessage(task.projectId, content, task.id, consentModelId, routingAnswerFor, resumeWorkflowRunId);
       if (state.task) setChats(previous => upsertChat(previous, state.task!));
-      if (selectedChatRef.current === task.id) { applyChatState(state); setAgents(state.agents); if (state.error) setError(state.error); }
+      if (selectedChatRef.current === task.id && applyChatState(state) && state.error) setError(state.error);
     } finally { setChatActivity(previous => ({ ...previous, [task.id]: 'idle' })); }
   }
 
@@ -1324,7 +1328,7 @@ function App() {
       <section className="chat-panel">
         <header className="chat-header">
           <div className="chat-title-area">
-            {messages.length > 0 ? <AgentStrip agents={agents} run={workflowRun} steps={workflowSteps} models={models} activeModel={activeModel} /> : <span className="new-chat-title">{currentTask?.title || 'Новый чат'}</span>}
+            {messages.length > 0 ? <AgentStrip agents={agents} run={workflowRun} steps={workflowSteps} plan={workflowPlan} planSteps={planSteps} models={models} activeModel={activeModel} /> : <span className="new-chat-title">{currentTask?.title || 'Новый чат'}</span>}
           </div>
           <div className="chat-header-actions">
             {pendingChanges.length > 0 && (
@@ -1445,6 +1449,10 @@ function App() {
               />
             )}
             {planSteps.length > 0 && <StepDock plan={workflowPlan} steps={planSteps} />}
+            {workflowFailure?.canResume && currentTask && <button type="button" disabled={chatActivity[currentTask.id] === 'running'} onClick={() => void sendChatRequest(currentTask, 'Продолжить', '', workflowFailure.runId).catch(err => setError(errorMessage(err)))}>Повторить запрос к модели</button>}
+            {requestState?.mode === 'clarify' && currentTask && <div className="routing-choices">
+              {['Показать в чате', 'Добавить в проект'].map(choice => <button type="button" key={choice} disabled={chatActivity[currentTask.id] === 'running'} onClick={() => void sendChatRequest(currentTask, choice, requestState.id).catch(err => setError(errorMessage(err)))}>{choice}</button>)}
+            </div>}
             <ToolActivity key={currentTask?.id} items={toolInvocations} />
           </div>
         )}
@@ -2726,12 +2734,16 @@ function AgentStrip({
   agents,
   run,
   steps,
+  plan,
+  planSteps,
   models,
   activeModel,
 }: {
   agents: AgentStatus[];
   run?: WorkflowRun | null;
   steps: WorkflowStep[];
+  plan?: WorkflowPlan | null;
+  planSteps: WorkflowPlanStep[];
   models: ModelConfig[];
   activeModel?: ModelConfig | null;
 }) {
@@ -2788,7 +2800,7 @@ function AgentStrip({
         </div>
       </div>
       <AgentRuntimeDashboard agent={activeAgent} agents={agents} model={runtimeModel} />
-      <WorkflowProgress agents={agents} run={run} steps={steps} />
+      <WorkflowProgress plan={plan} steps={planSteps} />
       <ActiveModelCard model={activeModel} />
     </div>
   );
@@ -3127,20 +3139,28 @@ function WebSourcesDock({
 }
 
 function StepDock({ plan, steps }: { plan?: WorkflowPlan | null; steps: WorkflowPlanStep[] }) {
-  const orderedSteps = [...steps].sort((left, right) => left.sortOrder - right.sortOrder);
-  const total = orderedSteps.length;
-  if (total === 0) {
-    return null;
-  }
-  const activeIndex = orderedSteps.findIndex((step) => step.id === plan?.currentStepId || step.status === 'running');
-  const doneCount = orderedSteps.filter((step) => step.status === 'done' || step.status === 'skipped').length;
-  const displayIndex = activeIndex >= 0 ? activeIndex + 1 : Math.max(1, Math.min(doneCount || 1, total));
-  const activeStep = orderedSteps[activeIndex >= 0 ? activeIndex : Math.min(displayIndex - 1, total - 1)];
-  const planStatus = plan?.status ?? activeStep?.status ?? 'queued';
+  const anchor = useRef<HTMLElement>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 12, bottom: 12, width: 320, maxHeight: 420 });
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const box = anchor.current?.getBoundingClientRect();
+      if (!box) return;
+      const width = Math.min(560, window.innerWidth - 24);
+      setPosition({ width, left: Math.max(12, Math.min(box.left + box.width / 2 - width / 2, window.innerWidth - width - 12)), bottom: Math.max(12, window.innerHeight - box.top), maxHeight: Math.min(460, Math.max(100, box.top - 16)) });
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => { window.removeEventListener('resize', update); window.removeEventListener('scroll', update, true); };
+  }, [open]);
+  const { orderedSteps, total, displayIndex, activeStep, planStatus } = planProgress(plan, steps);
+  if (!plan || total === 0) return null;
 
   return (
-    <section className="step-dock" aria-label="План выполнения">
-      <div className="step-dock-popover" role="tooltip">
+    <section ref={anchor} className="step-dock" aria-label="План выполнения" onMouseEnter={() => setOpen(true)} onMouseLeave={event => { if (!event.currentTarget.contains(document.activeElement)) setOpen(false); }} onKeyDown={event => { if (event.key === 'Escape') setOpen(false); }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
+      {open && <div className="step-dock-popover anchored" role="tooltip" style={position}>
         <div className="step-dock-header">
           <strong>{plan?.title || 'План выполнения'}</strong>
           <span>{displayIndex}/{total}</span>
@@ -3160,8 +3180,8 @@ function StepDock({ plan, steps }: { plan?: WorkflowPlan | null; steps: Workflow
             </div>
           ))}
         </div>
-      </div>
-      <button className={`step-dock-pill ${planStatus}`} type="button">
+      </div>}
+      <button className={`step-dock-pill ${planStatus}`} type="button" aria-expanded={open} onFocus={() => setOpen(true)} onClick={() => setOpen(true)}>
         <span className={`step-dock-dot ${activeStep?.status || planStatus}`} aria-hidden="true" />
         <span>Шаг {displayIndex} / {total}</span>
       </button>
@@ -3413,77 +3433,53 @@ function toggleSkill(skills: string[], skill: string): string[] {
   return [...current, normalized];
 }
 
-function WorkflowProgress({ agents, run, steps }: WorkflowProgressProps) {
-  const stepOrder = workflowOrderFor(run, steps);
-  const completedCount = stepOrder.filter((stepKey) => {
-    return steps.find((item) => item.stepKey === stepKey)?.status === 'done';
-  }).length;
-  const totalCount = stepOrder.length;
-  const runStatus = run?.status ?? 'idle';
-  const activeStepIndex = stepOrder.findIndex((stepKey) => stepKey === run?.currentStep);
-  const displayIndex = run ? (run.status === 'done' ? totalCount : Math.max(1, activeStepIndex + 1 || completedCount + 1)) : 0;
-  const currentStepKey = run
-    ? activeStepIndex >= 0
-      ? stepOrder[activeStepIndex]
-      : stepOrder[Math.min(displayIndex - 1, totalCount - 1)]
-    : stepOrder[0];
-  const currentStep = steps.find((item) => item.stepKey === currentStepKey);
-  const currentAgent = currentStep ? agents.find((item) => item.id === currentStep.agentId) : null;
-  const runStatusText = workflowRunStatusText(runStatus, completedCount, totalCount);
-  const currentAgentName = run ? currentAgent?.name ?? agentNameById(currentStep?.agentId ?? agentForStep(currentStepKey)) : 'Люмен';
-  const currentStepTitle = run ? workflowStepLabels[currentStepKey] ?? currentStepKey : 'Ожидает задачу';
-  const currentStepLine = run ? `${currentAgentName} · ${workflowStepLabels[currentStepKey] ?? currentStepKey}` : 'Пайплайн готов к запуску';
+function planProgress(plan: WorkflowPlan | null | undefined, steps: WorkflowPlanStep[]) {
+  const orderedSteps = [...steps].sort((a, b) => a.sortOrder - b.sortOrder);
+  const total = orderedSteps.length;
+  const doneCount = orderedSteps.filter(step => ['done', 'skipped'].includes(step.status)).length;
+  let activeIndex = orderedSteps.findIndex(step => step.id === plan?.currentStepId);
+  if (activeIndex < 0) activeIndex = orderedSteps.findIndex(step => ['running', 'failed', 'waiting_user'].includes(step.status));
+  if (plan?.status === 'done') activeIndex = total - 1;
+  const displayIndex = total ? (activeIndex >= 0 ? activeIndex + 1 : Math.min(doneCount + 1, total)) : 0;
+  const activeStep = orderedSteps[displayIndex - 1];
+  return { orderedSteps, total, doneCount, displayIndex, activeStep, planStatus: plan?.status ?? 'queued' };
+}
 
+function WorkflowProgress({ plan, steps }: { plan?: WorkflowPlan | null; steps: WorkflowPlanStep[] }) {
+  const { orderedSteps, total, doneCount, displayIndex, activeStep, planStatus } = planProgress(plan, steps);
+  if (!plan || total === 0) return null;
   return (
-    <section className={`workflow-compact ${runStatus}`} tabIndex={0} aria-label="Текущий шаг workflow">
+    <section className={`workflow-compact ${planStatus}`} tabIndex={0} aria-label="Текущий шаг workflow">
       <div className="workflow-compact-main">
         <div className="workflow-compact-head">
           <span>Ход работы</span>
-          <span className={`workflow-status ${runStatus}`}>{runStatusText}</span>
+          <span className={`workflow-status ${planStatus}`}>{workflowRunStatusText(planStatus, doneCount, total)}</span>
         </div>
         <div className="workflow-compact-title">
-          <span className="workflow-compact-index">{displayIndex}/{totalCount}</span>
-          <strong>{currentStepTitle}</strong>
+          <span className="workflow-compact-index">{displayIndex}/{total}</span>
+          <strong>{activeStep?.title || plan.title}</strong>
         </div>
-        <p className={run?.error ? 'workflow-step-error' : ''}>{run?.error || currentStepLine}</p>
+        <p className={activeStep?.error ? 'workflow-step-error' : ''}>{activeStep?.error || agentNameById(activeStep?.agentId || '')}</p>
       </div>
       <div className="workflow-popover" role="tooltip">
-        <div className="workflow-popover-header">
-          <strong>Ход работы</strong>
-          <span>{displayIndex}/{totalCount}</span>
-        </div>
+        <div className="workflow-popover-header"><strong>{plan.title}</strong><span>{displayIndex}/{total}</span></div>
         <div className="workflow-popover-steps">
-          {stepOrder.map((stepKey, index) => {
-          const step = steps.find((item) => item.stepKey === stepKey);
-          const agent = step ? agents.find((item) => item.id === step.agentId) : null;
-          const status = step?.status ?? (run?.currentStep === stepKey ? 'running' : 'queued');
-          const isActive = run?.currentStep === stepKey && run.status === 'running';
-          return (
-            <div key={stepKey} className={`workflow-step ${status} ${isActive ? 'active' : ''}`}>
-              <span className="workflow-step-index">{status === 'done' ? '✓' : index + 1}</span>
+          {orderedSteps.map((step, index) => (
+            <div key={step.id} className={`workflow-step ${step.status}`}>
+              <span className="workflow-step-index">{stepIcon(step.status, index + 1)}</span>
               <div className="workflow-step-body">
-                <div className="workflow-step-title">
-                  <strong>{workflowStepLabels[stepKey] ?? stepKey}</strong>
-                  <span className={`workflow-step-status ${status}`}>
-                    {statusLabels[status] ?? status}
-                  </span>
-                </div>
-                <p>{agent?.name ?? agentNameById(step?.agentId ?? agentForStep(stepKey))}</p>
-                {step?.output && <small>{workflowStepPreview(step, stepKey)}</small>}
-                {step?.error && <small className="workflow-step-error">{step.error}</small>}
+                <div className="workflow-step-title"><strong>{step.title}</strong><span>{statusLabels[step.status] || step.status}</span></div>
+                <p>{agentNameById(step.agentId)}</p>
+                <small>{step.description}</small>
+                {step.error && <small className="workflow-step-error">{step.error}</small>}
               </div>
             </div>
-          );
-        })}
-      </div>
-      <p className="workflow-popover-current">
-        {run ? `Сейчас: ${currentAgentName} · ${workflowStepLabels[currentStepKey] ?? currentStepKey}` : 'Сейчас: пайплайн не запущен'}
-      </p>
+          ))}
+        </div>
       </div>
     </section>
   );
 }
-
 function isRoutinePipelineMessage(message: Message): boolean {
   if (message.role !== 'agent') {
     return false;
@@ -3514,7 +3510,7 @@ function workflowRunStatusText(status: string, completedCount: number, totalCoun
   if (status === 'blocked') {
     return 'вмешательство';
   }
-  return `в работе ${completedCount}/${totalCount}`;
+  return 'в работе';
 }
 
 function upsertAgent(items: AgentStatus[], next: AgentStatus): AgentStatus[] {
@@ -3887,7 +3883,10 @@ function parseMarkdown(content: string): MarkdownBlock[] {
       if (index < lines.length) {
         index++;
       }
-      blocks.push({ type: 'code', language, code: codeLines.join('\n') });
+      const code = codeLines.join('\n');
+      if (code.trim() !== '') {
+        blocks.push({ type: 'code', language, code });
+      }
       continue;
     }
 

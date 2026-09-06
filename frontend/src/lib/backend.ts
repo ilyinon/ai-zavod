@@ -487,6 +487,9 @@ export type ToolInvocation = {
 };
 
 export type ProjectState = {
+  projectionRevision?: string;
+  requestState?: { id: string; sequence: number; mode: string; original: string; question?: string; workflowRunId?: string };
+  workflowFailure?: { runId: string; kind: string; message: string; canResume: boolean };
   toolInvocations?: ToolInvocation[];
   project: Project;
   task?: Task;
@@ -543,7 +546,7 @@ type WailsApp = {
   UpdateProject(input: { projectId: string; name: string; path: string }): Promise<Project>;
   DeleteProject(input: { projectId: string }): Promise<BootstrapState>;
   SelectProject(projectId: string): Promise<ProjectState>;
-  SendMessage(input: { projectId: string; taskId: string; content: string; toolConsentModelId: string }): Promise<ChatState>;
+  SendMessage(input: { projectId: string; taskId: string; content: string; toolConsentModelId: string; routingAnswerFor?: string; resumeWorkflowRunId?: string }): Promise<ChatState>;
   SubmitClarification(input: { projectId: string; workflowRunId: string; answers: ClarificationAnswer[] }): Promise<ChatState>;
   ApplyWorkflowChanges(input: { projectId: string; workflowRunId: string }): Promise<ChatState>;
   RollbackWorkflowChanges(input: { projectId: string; workflowRunId: string }): Promise<ChatState>;
@@ -632,7 +635,7 @@ export const backend = {
   selectChat: (id: string) => app().SelectChat(id),
   updateChat: (task: Task) => app().UpdateChat({ taskId: task.id, title: task.title, projectId: task.projectId, pinned: task.pinned, archived: task.status === 'archived', groupId: task.groupId || '', modelId: task.modelId || '' }),
   deleteChat: (id: string) => app().DeleteChat(id),
-  sendMessage: (projectId: string, content: string, taskId = '', toolConsentModelId = '') => app().SendMessage({ projectId, content, taskId, toolConsentModelId }),
+  sendMessage: (projectId: string, content: string, taskId = '', toolConsentModelId = '', routingAnswerFor = '', resumeWorkflowRunId = '') => app().SendMessage({ projectId, content, taskId, toolConsentModelId, routingAnswerFor, resumeWorkflowRunId }),
   submitClarification: (projectId: string, workflowRunId: string, answers: ClarificationAnswer[]) =>
     app().SubmitClarification({ projectId, workflowRunId, answers }),
   applyWorkflowChanges: (projectId: string, workflowRunId: string) =>

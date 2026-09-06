@@ -491,6 +491,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateChats(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateRuntimeState(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateToolRuns(ctx); err != nil {
 		return err
 	}
@@ -1079,7 +1082,7 @@ func (s *Store) LatestWorkflowRun(ctx context.Context, taskID string) (*workflow
 		SELECT id, task_id, status, current_step, started_at, finished_at, error
 		FROM workflow_runs
 		WHERE task_id = ?
-		ORDER BY started_at DESC
+		ORDER BY started_at DESC, rowid DESC
 		LIMIT 1
 	`, taskID).Scan(&item.ID, &item.TaskID, &item.Status, &item.CurrentStep, &item.StartedAt, &item.FinishedAt, &item.Error)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1150,7 +1153,7 @@ func (s *Store) ListWorkflowSteps(ctx context.Context, workflowRunID string) ([]
 		SELECT id, workflow_run_id, step_key, agent_id, status, input, output, started_at, finished_at, error
 		FROM workflow_steps
 		WHERE workflow_run_id = ?
-		ORDER BY started_at ASC
+		ORDER BY started_at ASC, rowid ASC
 	`, workflowRunID)
 	if err != nil {
 		return nil, err
@@ -3582,19 +3585,7 @@ func choosePlanStep(steps []workflow.PlanStep, stepKey string, fallbackAgentID s
 			return step
 		}
 	}
-	for _, step := range steps {
-		if fallbackAgentID != "" && step.AgentID == fallbackAgentID && (step.Status == workflow.StepStatusQueued || step.Status == workflow.StepStatusRunning) {
-			return step
-		}
-	}
-	for _, step := range steps {
-		if step.Status == workflow.StepStatusQueued || step.Status == workflow.StepStatusRunning {
-			return step
-		}
-	}
-	if len(steps) > 0 {
-		return steps[len(steps)-1]
-	}
+	// Hidden or unrelated runtime steps must not advance a visible neighbour.
 	return workflow.PlanStep{}
 }
 

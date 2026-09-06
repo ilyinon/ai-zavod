@@ -533,6 +533,9 @@ export namespace app {
 		}
 	}
 	export class ProjectState {
+	    projectionRevision: string;
+	    requestState?: chat.RequestState;
+	    workflowFailure?: store.WorkflowFailure;
 	    toolInvocations: toolruntime.Invocation[];
 	    project: project.Project;
 	    task?: chat.Task;
@@ -560,6 +563,9 @@ export namespace app {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.projectionRevision = source["projectionRevision"];
+	        this.requestState = this.convertValues(source["requestState"], chat.RequestState);
+	        this.workflowFailure = this.convertValues(source["workflowFailure"], store.WorkflowFailure);
 	        this.toolInvocations = this.convertValues(source["toolInvocations"], toolruntime.Invocation);
 	        this.project = this.convertValues(source["project"], project.Project);
 	        this.task = this.convertValues(source["task"], chat.Task);
@@ -656,6 +662,9 @@ export namespace app {
 	
 	
 	export class ChatState {
+	    projectionRevision: string;
+	    requestState?: chat.RequestState;
+	    workflowFailure?: store.WorkflowFailure;
 	    toolInvocations: toolruntime.Invocation[];
 	    project: project.Project;
 	    task?: chat.Task;
@@ -685,6 +694,9 @@ export namespace app {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.projectionRevision = source["projectionRevision"];
+	        this.requestState = this.convertValues(source["requestState"], chat.RequestState);
+	        this.workflowFailure = this.convertValues(source["workflowFailure"], store.WorkflowFailure);
 	        this.toolInvocations = this.convertValues(source["toolInvocations"], toolruntime.Invocation);
 	        this.project = this.convertValues(source["project"], project.Project);
 	        this.task = this.convertValues(source["task"], chat.Task);
@@ -1081,6 +1093,8 @@ export namespace app {
 	    }
 	}
 	export class SendMessageInput {
+	    resumeWorkflowRunId: string;
+	    routingAnswerFor: string;
 	    toolConsentModelId: string;
 	    taskId: string;
 	    projectId: string;
@@ -1092,6 +1106,8 @@ export namespace app {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.resumeWorkflowRunId = source["resumeWorkflowRunId"];
+	        this.routingAnswerFor = source["routingAnswerFor"];
 	        this.toolConsentModelId = source["toolConsentModelId"];
 	        this.taskId = source["taskId"];
 	        this.projectId = source["projectId"];
@@ -1432,6 +1448,28 @@ export namespace chat {
 	        this.createdAt = source["createdAt"];
 	    }
 	}
+	export class RequestState {
+	    id: string;
+	    sequence: number;
+	    mode: string;
+	    original: string;
+	    question?: string;
+	    workflowRunId?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new RequestState(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.sequence = source["sequence"];
+	        this.mode = source["mode"];
+	        this.original = source["original"];
+	        this.question = source["question"];
+	        this.workflowRunId = source["workflowRunId"];
+	    }
+	}
 	export class Task {
 	    groupId: string;
 	    modelId: string;
@@ -1571,6 +1609,30 @@ export namespace llm {
 	        this.updatedAt = source["updatedAt"];
 	    }
 	}
+	export class ProviderError {
+	    kind: string;
+	    retryable: boolean;
+	    modelId: string;
+	    httpStatus?: number;
+	    attempt: number;
+	    maxAttempts: number;
+	    elapsedMs: number;
+
+	    static createFrom(source: any = {}) {
+	        return new ProviderError(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.retryable = source["retryable"];
+	        this.modelId = source["modelId"];
+	        this.httpStatus = source["httpStatus"];
+	        this.attempt = source["attempt"];
+	        this.maxAttempts = source["maxAttempts"];
+	        this.elapsedMs = source["elapsedMs"];
+	    }
+	}
 
 }
 
@@ -1706,6 +1768,53 @@ export namespace reviews {
 	        this.createdAt = source["createdAt"];
 	    }
 	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace store {
+
+	export class WorkflowFailure {
+	    runId: string;
+	    stepKey: string;
+	    kind: string;
+	    message: string;
+	    provider?: llm.ProviderError;
+	    canResume: boolean;
+	    resumeFingerprint?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new WorkflowFailure(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.runId = source["runId"];
+	        this.stepKey = source["stepKey"];
+	        this.kind = source["kind"];
+	        this.message = source["message"];
+	        this.provider = this.convertValues(source["provider"], llm.ProviderError);
+	        this.canResume = source["canResume"];
+	        this.resumeFingerprint = source["resumeFingerprint"];
+	    }
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;

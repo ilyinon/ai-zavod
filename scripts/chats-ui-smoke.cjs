@@ -18,6 +18,7 @@ const assert = require('node:assert/strict');
       const emit = (event, data) => (listeners[event] || []).forEach(fn => fn(structuredClone(data)));
       const state = id => ({ project: projects.find(p => p.id === chats.find(t => t.id === id)?.projectId) || {}, task: chats.find(t => t.id === id), messages: messages[id] || [], toolInvocations: toolInvocations.filter(item => item.taskId === id), workflowSteps: [], planSteps: [], artifacts: [], changes: [], testRuns: [], reviews: [], webSources: [], agents: [] });
       window.__emit = emit;
+      window.__state = state;
       window.runtime = { EventsOn: (event, fn) => { (listeners[event] ||= []).push(fn); return () => { listeners[event] = listeners[event].filter(f => f !== fn); }; } };
       window.go = { main: { App: {
         Bootstrap: async () => ({ projects, chats, chat: state(''), selectedProjectId: '', agents: [], models: [model], activeModelId: 'm', agentGroups: [], agentGroupTemplates: [], agentLibrary: [] }),
@@ -51,6 +52,85 @@ const assert = require('node:assert/strict');
     await composer.fill('Сохранённый черновик');
     await page.getByRole('button', { name: 'Архитектура', exact: true }).click();
     await page.getByText('Существующая архитектура проекта', { exact: true }).waitFor();
+    const codeSample = 'def bubble_sort(arr):\n    n = len(arr)\n    for i in range(n):\n        for j in range(n - i - 1):\n            if arr[j] > arr[j + 1]:\n                arr[j], arr[j + 1] = arr[j + 1], arr[j]\n    return arr\n\n# ' + 'long comment '.repeat(30);
+    await page.evaluate(code => {
+      const state = window.__state('old');
+      state.messages.push({ id: 'formatted-code', taskId: 'old', role: 'agent', agentId: 'manager', content: 'Пример:\n```python\n' + code + '\n```\nВызови `bubble_sort(numbers)`.', createdAt: '' });
+      for (const [index, fence] of ['```', '```python', '```\n```', '```python\n  \n\t\n```'].entries()) {
+        state.messages.push({ id: 'empty-code-' + index, taskId: 'old', role: 'agent', agentId: 'manager', content: 'Ответ без кода ' + index + '.\n' + fence, createdAt: '' });
+      }
+      window.__emit('chat_state_changed', state);
+    }, codeSample);
+    const codeBlock = page.locator('.markdown-code-block code');
+    await codeBlock.waitFor();
+    assert.equal(await page.locator('.markdown-code-block').count(), 1, 'empty fences rendered dark strips');
+    assert.equal(await page.getByText(/^Ответ без кода \d\.$/).count(), 4, 'text before empty fences disappeared');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      assert.equal(await codeBlock.textContent(), codeSample, 'code newlines or indentation lost in DOM');
+      assert.equal(await codeBlock.evaluate(el => getComputedStyle(el).whiteSpace), 'pre', 'code must preserve whitespace');
+      const layout = await codeBlock.evaluate(el => {
+        const text = el.firstChild;
+        const at = offset => { const range = document.createRange(); range.setStart(text, offset); range.setEnd(text, offset + 1); return range.getBoundingClientRect(); };
+        const first = at(0), second = at(text.textContent.indexOf('    n') + 4);
+        return { lineBreak: second.y > first.y, indented: second.x > first.x, scrolls: el.parentElement.scrollWidth > el.parentElement.clientWidth };
+      });
+      assert.ok(layout.lineBreak && layout.indented, 'Python lines/indentation visually collapsed');
+      assert.ok(layout.scrolls, 'long code should scroll within its block');
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'code caused page overflow');
+      await page.screenshot({ path: '/tmp/zavod-code-' + width + '.png' });
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.evaluate(() => {
+      const state = window.__state('old');
+      state.agents = [{ id: 'manager', name: 'Люмен', status: 'idle', activity: 'Жду задачу', modelId: 'm', elapsedMs: 0, totalTokens: 0 }];
+      state.requestState = { id: 'req1', sequence: 1, mode: 'workflow', workflowRunId: 'run' };
+      state.projectionRevision = '10';
+      state.workflowRun = { id: 'run', taskId: 'old', status: 'running', currentStep: 'developer_plan' };
+      state.workflowPlan = { id: 'plan', taskId: 'old', workflowRunId: 'run', currentStepId: 's3', status: 'running', title: 'Пять настоящих шагов' };
+      state.planSteps = Array.from({ length: 5 }, (_, i) => ({ id: 's' + (i + 1), planId: 'plan', stepKey: 'step' + i, title: 'Шаг плана ' + (i + 1), agentId: 'manager', status: i < 2 ? 'done' : i === 2 ? 'running' : 'queued', sortOrder: i, description: 'Проверенное описание' }));
+      window.__workflowFixture = state;
+      window.__emit('chat_state_changed', state);
+    });
+    await page.getByRole('button', { name: 'Шаг 3 / 5', exact: true }).waitFor();
+    assert.equal(await page.locator('.workflow-compact-index').innerText(), '3/5');
+    await page.getByRole('button', { name: 'Шаг 3 / 5', exact: true }).hover();
+    await page.waitForFunction(() => getComputedStyle(document.querySelector('.step-dock-popover')).opacity === '1');
+    await page.screenshot({ path: '/tmp/zavod-reliability-desktop.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: 'Шаг 3 / 5', exact: true }).click();
+    const stepPanel = await page.locator('.step-dock-popover').boundingBox();
+    assert.ok(stepPanel.width > 300 && stepPanel.x >= 0 && stepPanel.x + stepPanel.width <= 390 && stepPanel.y >= 0, 'step popover outside mobile viewport');
+    await page.screenshot({ path: '/tmp/zavod-reliability-mobile.png' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.evaluate(() => {
+      const done = structuredClone(window.__workflowFixture);
+      done.projectionRevision = '11';
+      done.workflowPlan.status = 'done';
+      done.workflowPlan.currentStepId = 's5';
+      done.planSteps.forEach(step => { step.status = 'done'; });
+      window.__emit('chat_state_changed', done);
+      window.__emit('chat_state_changed', window.__workflowFixture);
+    });
+    await page.getByRole('button', { name: 'Шаг 5 / 5', exact: true }).waitFor();
+    assert.equal(await page.locator('.workflow-compact-index').innerText(), '5/5', 'stale revision replaced completed progress');
+    await page.evaluate(() => {
+      const state = structuredClone(window.__workflowFixture);
+      state.requestState = { id: 'req2', sequence: 2, mode: 'direct' };
+      state.projectionRevision = '20';
+      window.__emit('chat_state_changed', state);
+      window.__emit('chat_state_changed', window.__workflowFixture);
+      window.__emit('workflow_run_changed', { run: window.__workflowFixture.workflowRun });
+    });
+    assert.equal(await page.locator('.workflow-compact, .step-dock').count(), 0, 'old plan resurrected for direct answer');
+    await page.evaluate(() => {
+      const state = window.__state('old');
+      state.requestState = { id: 'req3', sequence: 3, mode: 'clarify', original: 'Нужна сортировка' };
+      state.projectionRevision = '30';
+      window.__emit('chat_state_changed', state);
+    });
+    await page.getByRole('button', { name: 'Показать в чате', exact: true }).waitFor();
+    assert.equal(await page.locator('.step-dock').count(), 0, 'clarification created plan');
     const toolButton = page.getByRole('button', { name: 'Инструменты · 1', exact: true });
     await toolButton.hover();
     await page.getByRole('region', { name: 'Вызовы инструментов' }).waitFor();

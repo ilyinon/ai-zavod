@@ -32,18 +32,25 @@ const (
 )
 
 type RuntimeState struct {
-	CurrentStepKey string
-	Results        map[string]StepResult
-	Attempts       map[string]int
-	Variables      map[string]string
-	HumanGates     map[string]bool
+	InFlight        map[string]int
+	ExecutionCounts map[string]int
+	TransitionCount int
+	RepairCount     int
+	LastFailure     string
+	LastFailureStep string
+	CurrentStepKey  string
+	Results         map[string]StepResult
+	Attempts        map[string]int
+	Variables       map[string]string
+	HumanGates      map[string]bool
 }
 
 type StepResult struct {
-	StepKey string
-	Status  string
-	Output  string
-	Error   string
+	Terminal bool
+	StepKey  string
+	Status   string
+	Output   string
+	Error    string
 }
 
 type RuntimeDecision struct {
@@ -130,6 +137,9 @@ func (e Executor) NextAction(state RuntimeState) RuntimeDecision {
 		return RuntimeDecision{Action: ActionComplete, Reason: "lifecycle has no remaining steps"}
 	}
 	cfg, err := ParseStepRuntimeConfig(current.OutputSchema)
+	if result := state.Results[current.StepKey]; result.Terminal {
+		return RuntimeDecision{Action: ActionBlocked, Step: current, Reason: result.Error}
+	}
 	if err != nil {
 		return RuntimeDecision{Action: ActionBlocked, Step: current, Reason: err.Error()}
 	}
@@ -332,7 +342,7 @@ func (e Executor) canRetryFromState(step agentgroups.LifecycleStep, state Runtim
 	if !step.CanRetry {
 		return false
 	}
-	limit := e.RetryLimit(step.StepKey)
+	limit := step.MaxRetries
 	if limit <= 0 {
 		return false
 	}

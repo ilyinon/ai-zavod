@@ -2,7 +2,6 @@ package lifecycleruntime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -26,6 +25,7 @@ type StepContext struct {
 }
 
 type StepResult struct {
+	TerminalError  error
 	Status         string
 	Output         string
 	Error          string
@@ -44,6 +44,7 @@ type Result struct {
 }
 
 type Runner struct {
+	checkpoint     func(lifecycler.RuntimeState) error
 	executor       lifecycler.Executor
 	handlers       map[string]StepHandler
 	defaultHandler StepHandler
@@ -71,68 +72,137 @@ func (r Runner) WithMaxTurns(maxTurns int) Runner {
 	return r
 }
 
+func (r Runner) WithCheckpoint(save func(lifecycler.RuntimeState) error) Runner {
+	r.checkpoint = save
+	return r
+}
+
+type StopError struct {
+	Kind  string
+	Cause string
+}
+
+func (e *StopError) Error() string {
+	labels := map[string]string{"step_budget": "Исчерпан лимит выполнений шага", "repair_budget": "Исчерпан лимит доработок", "transition_budget": "Обнаружен цикл переходов: исчерпан общий лимит"}
+	text := labels[e.Kind]
+	if text == "" {
+		text = "Lifecycle остановлен"
+	}
+	if e.Cause != "" {
+		text += ". Причина: " + e.Cause
+	}
+	return text
+}
+
 func (r Runner) Run(ctx context.Context, state lifecycler.RuntimeState) (Result, error) {
 	state = normalizeState(state)
+	finish := func(status, reason string, err error) (Result, error) {
+		if r.checkpoint != nil {
+			if saveErr := r.checkpoint(cloneState(state)); saveErr != nil {
+				return resultFromState(state, zw.StatusFailed, saveErr.Error()), saveErr
+			}
+		}
+		return resultFromState(state, status, reason), err
+	}
 	maxTurns := r.maxTurns
 	if maxTurns <= 0 {
 		maxTurns = defaultMaxTurns(r.executor)
 	}
 	forceNextRun := map[string]bool{}
-	for turn := 0; turn < maxTurns; turn++ {
+	for {
 		if err := ctx.Err(); err != nil {
-			return resultFromState(state, zw.StatusFailed, err.Error()), err
+			return finish(zw.StatusFailed, err.Error(), err)
 		}
 		decision := r.executor.NextAction(state)
-		switch decision.Action {
-		case lifecycler.ActionComplete:
-			return resultFromState(state, zw.StatusDone, decision.Reason), nil
-		case lifecycler.ActionBlocked:
-			return resultFromState(state, zw.StatusBlocked, firstNonEmpty(decision.Reason, "lifecycle runtime blocked")), nil
-		case lifecycler.ActionWaitHuman:
-			return resultFromState(state, zw.StatusWaitingUser, firstNonEmpty(decision.Reason, "workflow waits for user input")), nil
-		case lifecycler.ActionSkip:
-			state.Results[decision.Step.StepKey] = lifecycler.StepResult{
-				StepKey: decision.Step.StepKey,
-				Status:  zw.StepStatusSkipped,
-				Error:   decision.Reason,
+		// Completion consumes no execution budget, including at the exact limit.
+		if decision.Action == lifecycler.ActionComplete {
+			return finish(zw.StatusDone, decision.Reason, nil)
+		}
+		if decision.Action == lifecycler.ActionWaitHuman {
+			return finish(zw.StatusWaitingUser, decision.Reason, nil)
+		}
+		if decision.Action == lifecycler.ActionBlocked {
+			return finish(zw.StatusBlocked, firstNonEmpty(state.LastFailure, decision.Reason), nil)
+		}
+		if state.TransitionCount >= maxTurns {
+			err := &StopError{Kind: "transition_budget", Cause: state.LastFailure}
+			return finish(zw.StatusBlocked, err.Error(), err)
+		}
+		state.TransitionCount++
+		failed := state.Results[decision.Step.StepKey].Status
+		if decision.Action == lifecycler.ActionRetry || decision.Action == lifecycler.ActionJump && (failed == zw.StepStatusFailed || failed == "needs_work") {
+			limit := r.executor.Definition().MaxRepairIterations
+			if limit > 0 && state.RepairCount >= limit {
+				err := &StopError{Kind: "repair_budget", Cause: state.LastFailure}
+				return finish(zw.StatusBlocked, err.Error(), err)
 			}
+			state.RepairCount++
+		}
+		if r.checkpoint != nil {
+			if err := r.checkpoint(cloneState(state)); err != nil {
+				return finish(zw.StatusFailed, err.Error(), err)
+			}
+		}
+		switch decision.Action {
+		case lifecycler.ActionSkip:
+			state.Results[decision.Step.StepKey] = lifecycler.StepResult{StepKey: decision.Step.StepKey, Status: zw.StepStatusSkipped, Error: decision.Reason}
 			state.CurrentStepKey = decision.NextStepKey
 		case lifecycler.ActionJump:
-			if strings.TrimSpace(decision.NextStepKey) != "" {
+			mode := normalizeMode(decision.Step.Mode)
+			if mode == lifecycler.ModeBranch || mode == lifecycler.ModeHumanGate {
+				state.Results[decision.Step.StepKey] = lifecycler.StepResult{StepKey: decision.Step.StepKey, Status: zw.StepStatusDone}
+			}
+			target, exists := r.executor.Step(decision.NextStepKey)
+			ordered := r.executor.Steps()
+			from, to := -1, -1
+			for index, step := range ordered {
+				if step.StepKey == decision.Step.StepKey {
+					from = index
+				}
+				if step.StepKey == decision.NextStepKey {
+					to = index
+				}
+			}
+			if exists && to >= 0 && to <= from {
+				// Repair invalidates dependent outputs, but never their execution budgets.
+				for _, affected := range ordered[to : from+1] {
+					delete(state.Results, affected.StepKey)
+					forceNextRun[affected.StepKey] = true
+				}
+			} else if exists && state.Results[target.StepKey].Status == zw.StepStatusFailed {
 				delete(state.Results, decision.NextStepKey)
 				forceNextRun[decision.NextStepKey] = true
 			}
 			state.CurrentStepKey = decision.NextStepKey
-		case lifecycler.ActionRetry:
-			stepResult := r.runStep(ctx, decision.Step, state, decision, true, true, false)
-			state = applyStepResult(state, decision.Step.StepKey, stepResult)
-			if stepResult.WaitHuman {
-				return resultFromState(state, zw.StatusWaitingUser, firstNonEmpty(stepResult.Error, decision.Reason)), nil
+		case lifecycler.ActionRun, lifecycler.ActionRetry, lifecycler.ActionRunParallel:
+			steps := []agentgroups.LifecycleStep{decision.Step}
+			parallel := decision.Action == lifecycler.ActionRunParallel
+			if parallel {
+				steps = decision.Steps
 			}
-		case lifecycler.ActionRun:
-			force := forceNextRun[decision.Step.StepKey]
-			delete(forceNextRun, decision.Step.StepKey)
-			stepResult := r.runStep(ctx, decision.Step, state, decision, false, force, false)
-			state = applyStepResult(state, decision.Step.StepKey, stepResult)
-			if stepResult.WaitHuman {
-				return resultFromState(state, zw.StatusWaitingUser, firstNonEmpty(stepResult.Error, decision.Reason)), nil
-			}
-		case lifecycler.ActionRunParallel:
-			for _, step := range decision.Steps {
-				stepResult := r.runStep(ctx, step, state, decision, false, false, true)
-				state = applyStepResult(state, step.StepKey, stepResult)
-				if stepResult.WaitHuman {
-					return resultFromState(state, zw.StatusWaitingUser, firstNonEmpty(stepResult.Error, decision.Reason)), nil
+			for _, step := range steps {
+				if err := ctx.Err(); err != nil {
+					return finish(zw.StatusFailed, err.Error(), err)
+				}
+				force := forceNextRun[step.StepKey] || state.ExecutionCounts[step.StepKey] > 0
+				delete(forceNextRun, step.StepKey)
+				res := r.runStep(ctx, step, state, decision, decision.Action == lifecycler.ActionRetry, force || decision.Action == lifecycler.ActionRetry, parallel)
+				state = applyStepResult(state, step.StepKey, res)
+				if res.TerminalError != nil {
+					return finish(zw.StatusFailed, res.Error, res.TerminalError)
+				}
+				if res.WaitHuman {
+					return finish(zw.StatusWaitingUser, res.Error, nil)
 				}
 			}
-			state.CurrentStepKey = decision.Step.StepKey
+			if parallel {
+				state.CurrentStepKey = decision.Step.StepKey
+			}
 		default:
 			err := fmt.Errorf("unknown lifecycle runtime action: %s", decision.Action)
-			return resultFromState(state, zw.StatusFailed, err.Error()), err
+			return finish(zw.StatusFailed, err.Error(), err)
 		}
 	}
-	err := errors.New("lifecycle runtime reached max turns")
-	return resultFromState(state, zw.StatusBlocked, err.Error()), err
 }
 
 func (r Runner) runStep(ctx context.Context, step agentgroups.LifecycleStep, state lifecycler.RuntimeState, decision lifecycler.RuntimeDecision, retry bool, force bool, parallel bool) StepResult {
@@ -140,11 +210,24 @@ func (r Runner) runStep(ctx context.Context, step agentgroups.LifecycleStep, sta
 	if handler == nil {
 		return StepResult{Status: zw.StepStatusFailed, Error: "handler not found for lifecycle mode: " + firstNonEmpty(step.Mode, lifecycler.ModeLLM)}
 	}
-	attempt := state.Attempts[step.StepKey]
-	if retry {
-		attempt++
-		state.Attempts[step.StepKey] = attempt
+	count := state.ExecutionCounts[step.StepKey]
+	limit := 1
+	if step.CanRetry {
+		limit += step.MaxRetries
 	}
+	if count >= limit {
+		err := &StopError{Kind: "step_budget", Cause: firstNonEmpty(state.LastFailure, step.Title)}
+		return StepResult{Status: zw.StepStatusFailed, Error: err.Error(), TerminalError: err}
+	}
+	state.ExecutionCounts[step.StepKey] = count + 1
+	state.InFlight[step.StepKey] = count + 1
+	state.Attempts[step.StepKey] = count
+	if r.checkpoint != nil {
+		if err := r.checkpoint(cloneState(state)); err != nil {
+			return StepResult{Status: zw.StepStatusFailed, Error: err.Error(), TerminalError: err}
+		}
+	}
+	attempt := count
 	result := handler(ctx, StepContext{
 		Step:        step,
 		Attempt:     attempt,
@@ -170,20 +253,38 @@ func (r Runner) handlerFor(mode string) StepHandler {
 
 func applyStepResult(state lifecycler.RuntimeState, stepKey string, result StepResult) lifecycler.RuntimeState {
 	state = normalizeState(state)
+	delete(state.InFlight, stepKey)
 	for key, value := range result.Variables {
 		state.Variables[key] = value
 	}
 	state.Results[stepKey] = lifecycler.StepResult{
-		StepKey: stepKey,
-		Status:  firstNonEmpty(result.Status, zw.StepStatusDone),
-		Output:  result.Output,
-		Error:   result.Error,
+		Terminal: result.TerminalError != nil,
+		StepKey:  stepKey,
+		Status:   firstNonEmpty(result.Status, zw.StepStatusDone),
+		Output:   result.Output,
+		Error:    result.Error,
 	}
 	state.CurrentStepKey = stepKey
+	if result.Status == zw.StepStatusFailed {
+		state.LastFailure = result.Error
+		state.LastFailureStep = stepKey
+	} else if result.Status == zw.StepStatusDone && state.LastFailureStep == stepKey {
+		state.LastFailure = ""
+		state.LastFailureStep = ""
+	}
 	return state
 }
 
 func normalizeState(state lifecycler.RuntimeState) lifecycler.RuntimeState {
+	if state.InFlight == nil {
+		state.InFlight = map[string]int{}
+	}
+	if state.ExecutionCounts == nil {
+		state.ExecutionCounts = map[string]int{}
+		for key := range state.Results {
+			state.ExecutionCounts[key] = state.Attempts[key] + 1
+		}
+	}
 	if state.Results == nil {
 		state.Results = map[string]lifecycler.StepResult{}
 	}
@@ -251,6 +352,8 @@ func outputsFromState(state lifecycler.RuntimeState) map[string]string {
 
 func cloneState(state lifecycler.RuntimeState) lifecycler.RuntimeState {
 	return lifecycler.RuntimeState{
+		InFlight:        cloneIntMap(state.InFlight),
+		ExecutionCounts: cloneIntMap(state.ExecutionCounts), TransitionCount: state.TransitionCount, RepairCount: state.RepairCount, LastFailure: state.LastFailure, LastFailureStep: state.LastFailureStep,
 		CurrentStepKey: state.CurrentStepKey,
 		Results:        cloneResults(state.Results),
 		Attempts:       cloneIntMap(state.Attempts),

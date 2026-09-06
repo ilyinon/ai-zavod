@@ -430,7 +430,7 @@ func (c *Client) weatherSource(ctx context.Context, text string, settings Settin
 	description := weatherCodeText(forecast.Current.WeatherCode)
 	title := fmt.Sprintf("Погода: %s, %s", place.Name, place.Country)
 	excerpt := fmt.Sprintf(
-		"Источник: Open-Meteo. Локация: %s, %s. Координаты: %.4f, %.4f. Время данных: %s. Температура: %.1f %s. Ощущается как: %.1f %s. Влажность: %d %s. Осадки: %.1f %s. Ветер: %.1f %s, направление %.0f°. Условия: %s.",
+		"%s, %s (%.4f, %.4f). Данные на %s, местное время.\n\nТемпература: **%.1f %s**, ощущается как **%.1f %s**.\n\n- Влажность: %d %s\n- Осадки: %.1f %s\n- Ветер: %.1f %s, направление %.0f°\n- Условия: %s.",
 		place.Name,
 		place.Country,
 		place.Latitude,
@@ -838,6 +838,8 @@ func cleanWeatherLocation(value string) string {
 func normalizeWeatherLocation(value string) string {
 	lower := strings.ToLower(strings.TrimSpace(value))
 	aliases := map[string]string{
+		"нижнем новгороде": "Нижний Новгород",
+		"нижний новгород":  "Нижний Новгород",
 		"минске":           "Минск",
 		"минск":            "Минск",
 		"москве":           "Москва",

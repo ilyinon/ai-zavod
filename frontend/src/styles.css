@@ -1501,6 +1501,9 @@ code {
   background: transparent;
   color: inherit;
   padding: 0;
+  white-space: pre;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .message.pending p {
@@ -3350,6 +3353,25 @@ code {
   opacity: 1;
   pointer-events: auto;
   transform: translate(-50%, 0);
+}
+
+.step-dock .step-dock-popover.anchored {
+  position: fixed;
+  z-index: 40;
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.routing-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.routing-choices button {
+  white-space: normal;
+  font-weight: 500;
 }
 
 .changes-dock-header,

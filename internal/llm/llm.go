@@ -32,6 +32,7 @@ type ToolFunction struct {
 }
 
 type Request struct {
+	NoRetry     bool      `json:"-"`
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`

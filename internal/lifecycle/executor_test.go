@@ -141,7 +141,7 @@ func TestRuntimeRetriesThenReturnsToConfiguredStep(t *testing.T) {
 	cfg := mustRuntimeConfig(t, StepRuntimeConfig{ReturnToStepKey: "developer"})
 	executor := NewExecutor(agentgroups.LifecycleDefinition{MaxRepairIterations: 1}, []agentgroups.LifecycleStep{
 		{StepKey: "developer", Mode: ModeLLM},
-		{StepKey: "review", Mode: ModeReview, CanRetry: true, OutputSchema: cfg},
+		{StepKey: "review", Mode: ModeReview, CanRetry: true, MaxRetries: 1, OutputSchema: cfg},
 	})
 
 	decision := executor.NextAction(RuntimeState{

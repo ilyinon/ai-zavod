@@ -88,26 +88,29 @@ type BootstrapState struct {
 }
 
 type ProjectState struct {
-	ToolInvocations []toolruntime.Invocation `json:"toolInvocations"`
-	Project         ProjectDTO               `json:"project"`
-	Task            *TaskDTO                 `json:"task,omitempty"`
-	Messages        []MessageDTO             `json:"messages"`
-	WorkflowRun     *WorkflowRunDTO          `json:"workflowRun,omitempty"`
-	WorkflowSteps   []WorkflowStepDTO        `json:"workflowSteps"`
-	WorkflowPlan    *WorkflowPlanDTO         `json:"workflowPlan,omitempty"`
-	PlanSteps       []WorkflowPlanStepDTO    `json:"planSteps"`
-	Artifacts       []ArtifactDTO            `json:"artifacts"`
-	Blueprint       *BlueprintDTO            `json:"blueprint,omitempty"`
-	Clarification   *ClarificationDTO        `json:"clarification,omitempty"`
-	TaskSpec        *TaskSpecDTO             `json:"taskSpec,omitempty"`
-	ProjectMemory   *ProjectMemoryDTO        `json:"projectMemory,omitempty"`
-	Changes         []ProposedChangeDTO      `json:"changes"`
-	TestRuns        []TestRunDTO             `json:"testRuns"`
-	Reviews         []ReviewRunDTO           `json:"reviews"`
-	WebSources      []WebSourceDTO           `json:"webSources"`
-	CTFWorkspace    *CTFWorkspaceDTO         `json:"ctfWorkspace,omitempty"`
-	AgentGroup      *AgentGroupDTO           `json:"agentGroup,omitempty"`
-	GroupBinding    *ProjectGroupBindingDTO  `json:"groupBinding,omitempty"`
+	ProjectionRevision string                   `json:"projectionRevision"`
+	RequestState       *chat.RequestState       `json:"requestState,omitempty"`
+	WorkflowFailure    *store.WorkflowFailure   `json:"workflowFailure,omitempty"`
+	ToolInvocations    []toolruntime.Invocation `json:"toolInvocations"`
+	Project            ProjectDTO               `json:"project"`
+	Task               *TaskDTO                 `json:"task,omitempty"`
+	Messages           []MessageDTO             `json:"messages"`
+	WorkflowRun        *WorkflowRunDTO          `json:"workflowRun,omitempty"`
+	WorkflowSteps      []WorkflowStepDTO        `json:"workflowSteps"`
+	WorkflowPlan       *WorkflowPlanDTO         `json:"workflowPlan,omitempty"`
+	PlanSteps          []WorkflowPlanStepDTO    `json:"planSteps"`
+	Artifacts          []ArtifactDTO            `json:"artifacts"`
+	Blueprint          *BlueprintDTO            `json:"blueprint,omitempty"`
+	Clarification      *ClarificationDTO        `json:"clarification,omitempty"`
+	TaskSpec           *TaskSpecDTO             `json:"taskSpec,omitempty"`
+	ProjectMemory      *ProjectMemoryDTO        `json:"projectMemory,omitempty"`
+	Changes            []ProposedChangeDTO      `json:"changes"`
+	TestRuns           []TestRunDTO             `json:"testRuns"`
+	Reviews            []ReviewRunDTO           `json:"reviews"`
+	WebSources         []WebSourceDTO           `json:"webSources"`
+	CTFWorkspace       *CTFWorkspaceDTO         `json:"ctfWorkspace,omitempty"`
+	AgentGroup         *AgentGroupDTO           `json:"agentGroup,omitempty"`
+	GroupBinding       *ProjectGroupBindingDTO  `json:"groupBinding,omitempty"`
 }
 
 type ChatState struct {
@@ -157,10 +160,12 @@ type DeleteProjectInput struct {
 }
 
 type SendMessageInput struct {
-	ToolConsentModelID string `json:"toolConsentModelId"`
-	TaskID             string `json:"taskId"`
-	ProjectID          string `json:"projectId"`
-	Content            string `json:"content"`
+	ResumeWorkflowRunID string `json:"resumeWorkflowRunId"`
+	RoutingAnswerFor    string `json:"routingAnswerFor"`
+	ToolConsentModelID  string `json:"toolConsentModelId"`
+	TaskID              string `json:"taskId"`
+	ProjectID           string `json:"projectId"`
+	Content             string `json:"content"`
 }
 
 type SubmitClarificationInput struct {
@@ -673,6 +678,10 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		return ChatState{}, err
 	}
 	defer release()
+	content, requestState, forcedDecision, err := s.beginRoutedRequest(ctx, *task, input, content)
+	if err != nil {
+		return ChatState{}, err
+	}
 	currentProject := project.Project{}
 	if task.ProjectID != "" {
 		currentProject, err = s.store.GetProject(ctx, task.ProjectID)
@@ -690,8 +699,8 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	if _, err := s.store.UpdateChat(ctx, *task); err != nil {
 		return ChatState{}, err
 	}
-	if !resumingWorkspace {
-		if _, err := s.store.AddMessage(ctx, task.ID, "user", "", content); err != nil {
+	if !resumingWorkspace && input.ResumeWorkflowRunID == "" {
+		if _, err := s.store.AddMessage(ctx, task.ID, "user", "", strings.TrimSpace(input.Content)); err != nil {
 			return ChatState{}, err
 		}
 	}
@@ -715,8 +724,30 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	decision := router.Route(content, router.Context{
 		HasActiveClarification: latestRun != nil && latestRun.Status == zw.StatusWaitingUser,
 	})
-	if decision.Confidence == "low" {
+	if forcedDecision != nil {
+		decision = *forcedDecision
+	} else if decision.Confidence == "low" {
 		decision = s.classifyIntentWithModel(ctx, provider, model, currentProject, *task, latestRun, content, decision)
+	}
+	if decision.NeedsClarification {
+		requestState.Mode = "clarify"
+		requestState.Question = "Показать пример здесь или добавить реализацию в проект?"
+		if err := s.store.SaveRequestState(ctx, task.ID, requestState); err != nil {
+			return ChatState{}, err
+		}
+		_, err := s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, requestState.Question)
+		if err != nil {
+			return ChatState{}, err
+		}
+		s.resetAgentStatuses(model.ID)
+		return s.emitChatState(ctx, input.ProjectID, ""), nil
+	}
+	requestState.Mode = "direct"
+	if decision.NeedsWorkflow {
+		requestState.Mode = "workflow"
+	}
+	if err := s.store.SaveRequestState(ctx, task.ID, requestState); err != nil {
+		return ChatState{}, err
 	}
 	orch := s.orchestrateMessage(ctx, currentProject, *task, content, decision, model.ID)
 	if task.GroupID != "" {
@@ -746,8 +777,33 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 
 	resumingRun := decision.Intent == router.IntentClarificationAnswer && latestRun != nil && latestRun.Status == zw.StatusWaitingUser
 	var run zw.Run
-	if resumingRun {
+	if input.ResumeWorkflowRunID != "" {
+		parent, state, err := s.validateContinuation(ctx, *task, input.ResumeWorkflowRunID)
+		if err != nil {
+			return ChatState{}, err
+		}
+		run, err = s.store.ContinueWorkflow(ctx, *parent, state)
+		if err != nil {
+			return ChatState{}, err
+		}
+	} else if resumingRun {
 		run = *latestRun
+		checkpoint, found, err := s.store.LoadLifecycleState(ctx, run.ID)
+		if err != nil {
+			return ChatState{}, err
+		}
+		if found {
+			if checkpoint.HumanGates == nil {
+				checkpoint.HumanGates = map[string]bool{}
+			}
+			checkpoint.HumanGates[run.CurrentStep] = true
+			if checkpoint.Results[run.CurrentStep].Status == zw.StatusWaitingUser {
+				delete(checkpoint.Results, run.CurrentStep)
+			}
+			if err := s.store.SaveLifecycleState(ctx, run.ID, checkpoint); err != nil {
+				return ChatState{}, err
+			}
+		}
 		run.Status = zw.StatusRunning
 		if err := s.store.UpdateWorkflowRun(ctx, run.ID, zw.StatusRunning, run.CurrentStep, ""); err != nil {
 			return ChatState{}, err
@@ -759,7 +815,11 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		}
 		run = createdRun
 	}
-	if decision.Intent == router.IntentClarificationAnswer {
+	requestState.WorkflowRunID = run.ID
+	if err := s.store.SaveRequestState(ctx, task.ID, requestState); err != nil {
+		return ChatState{}, err
+	}
+	if decision.Intent == router.IntentClarificationAnswer || input.ResumeWorkflowRunID != "" {
 		_ = s.patchTaskSpec(ctx, taskspec.Spec{
 			ProjectID:     currentProject.ID,
 			TaskID:        task.ID,
@@ -773,6 +833,12 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 	s.emitWorkflowRun(run)
 	if !resumingRun {
 		_ = s.createDynamicWorkflowPlan(ctx, currentProject, *task, run.ID, provider, model, content, decision.Intent)
+		if input.ResumeWorkflowRunID != "" {
+			previous, _ := s.store.ListWorkflowSteps(ctx, run.ID)
+			for _, step := range previous {
+				_ = s.store.FinishWorkflowPlanStep(ctx, run.ID, step.StepKey, step.AgentID, step.Status, step.Error)
+			}
+		}
 	}
 
 	history, err := s.store.ListMessages(ctx, task.ID)
@@ -944,7 +1010,8 @@ func (s *Service) answerDirect(
 Сейчас режим Direct Answer: пользователь задал вопрос или попросил объяснение, а не запуск полного workflow.
 Не утверждай, что ты изменила файлы, запустила тесты или провела пентест, если этого нет в контексте.
 Не выводи сырой JSON, если можно объяснить человечески.
-Если вопрос про безопасность или пентест, сначала фиксируй scope и разрешение; не предлагай атаковать внешние цели без явного разрешения.
+Не угадывай значения незнакомых названий, производителя, версии и характеристики. Если название неоднозначно, попроси точное имя или ссылку. Уверенность роутера означает выбор маршрута, а не достоверность знаний. Без подтверждения не выдавай сведения об актуальных моделях и продуктах как факты.
+Для активных проверок безопасности сначала фиксируй scope и разрешение. Теоретическое объяснение не требует активных проверок или подтверждения scope.
 Ответ должен быть коротким, практичным и привязанным к фактам из контекста.
 `),
 			},
@@ -964,6 +1031,10 @@ func (s *Service) answerDirect(
 		resp, err = provider.Generate(answerCtx, req)
 	}
 	if err != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = s.store.AddMessage(ctx, task.ID, "agent", agents.ManagerID, "Не смогла получить ответ модели: "+err.Error())
+		s.resetAgentStatuses(model.ID)
 		s.setAgentStatus(agents.ManagerID, "failed", "Не смогла ответить напрямую", model.ID)
 		return s.emitChatState(ctx, currentProject.ID, "Люмен не смогла ответить напрямую: "+err.Error()), nil
 	}
@@ -1024,15 +1095,7 @@ func (s *Service) createDynamicWorkflowPlan(
 		return err
 	}
 
-	planCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
-	input := fmt.Sprintf("Intent: %s\nПроект: %s\nЗадача: %s", intent, currentProject.Name, userMessage)
-	if resp, err := provider.Generate(planCtx, agents.RequestForSpec(model.ModelName, agents.SpecForStep(zw.StepUserPlan), input)); err == nil && resp != nil {
-		if parsedPlan, parsedSteps, ok := parseDynamicWorkflowPlan(resp.Content, currentProject, task, workflowRunID, intent); ok {
-			plan = parsedPlan
-			steps = parsedSteps
-		}
-	}
+	// Show executable steps, not an independently generated list of promises.
 
 	_, _, err := s.store.CreateWorkflowPlan(ctx, plan, steps)
 	if err == nil {
@@ -1441,6 +1504,9 @@ func (s *Service) runWebResearchWorkflow(
 	synthesis, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepResearchSynthesis, buildResearchSynthesisInput(userMessage, currentProject, plan, sources, sourceReview))
 	if err != nil {
 		return s.handleWorkflowError(ctx, projectID, task.ID, run.ID, zw.StepResearchSynthesis, model.ID, err), nil
+	}
+	if router.NeedsCurrentSources(userMessage) {
+		synthesis = renderVerifiedResearch(synthesis, sources)
 	}
 	notes, err := s.runWorkflowStep(ctx, projectID, task.ID, run, provider, model, zw.StepResearchNotes, buildResearchNotesInput(userMessage, currentProject, plan, sources, sourceReview, synthesis))
 	if err != nil {
@@ -2132,10 +2198,11 @@ func (s *Service) classifyIntentWithModel(
 	fallback router.Decision,
 ) router.Decision {
 	s.setAgentStatus(agents.ManagerID, "thinking", "Определяет тип запроса", model.ID)
-	classifyCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	classifyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	resp, err := provider.Generate(classifyCtx, llm.Request{
-		Model: model.ModelName,
+		NoRetry: true,
+		Model:   model.ModelName,
 		Messages: []llm.Message{
 			{
 				Role: "system",
@@ -2152,13 +2219,14 @@ func (s *Service) classifyIntentWithModel(
 }
 
 Правила:
-- coding_task если пользователь просит написать, создать, изменить, исправить, применить или сгенерировать программу, скрипт, файлы или код.
-- Фразы "напиши на Go/Python/JS", "сделай скрипт", "создай программу", "реализуй" всегда coding_task, даже если можно ответить примером в чат.
+- coding_task только если пользователь поручает создать или изменить результат в проекте. Вопросительная форма "можешь исправить файл?" может быть поручением.
+- "как написать", "объясни", "покажи пример в чате" означают direct_answer, если нет отдельного поручения изменить проект. Цитаты и логи не являются инструкциями.
+- Если непонятно, нужен ответ или действие: needs_clarification=true, needs_workflow=false. Не угадывай разрешение на изменения.
 - direct_answer если пользователь спрашивает "что/почему/как/опиши/объясни" по уже существующим данным.
 - project_analysis если нужно читать проект, но не менять файлы.
 - workflow_control если пользователь управляет текущим workflow.
-- pentest_task если запрос про безопасность/пентест/уязвимости.
-- research_task если пользователь явно просит найти, проверить или актуализировать информацию в интернете.
+- pentest_task только для практической ИБ-задачи; "что такое RCE?" это direct_answer.
+- research_task если пользователь просит поиск, актуальные характеристики, цены или сравнение конкретных моделей/продуктов, даже без слова "загугли". Теоретические вопросы об алгоритмах и математических моделях не требуют поиска. Не угадывай производителя по незнакомому названию.
 - general_chat если вопрос общий и не про проект.
 `),
 			},
@@ -2181,6 +2249,10 @@ func (s *Service) classifyIntentWithModel(
 	}
 	decision.Source = "llm"
 	decision = normalizeIntentDecision(decision)
+	if fallback.NeedsClarification {
+		decision.NeedsClarification = true
+		decision.NeedsWorkflow = false
+	}
 	if decision.Intent == "" {
 		return fallback
 	}
@@ -3678,6 +3750,21 @@ func (s *Service) runV03Workflow(
 
 	executed := map[string]bool{}
 	outputs := map[string]string{}
+	if run != nil {
+		previous, err := s.store.ListWorkflowSteps(ctx, run.ID)
+		if err != nil {
+			return result, err
+		}
+		for _, step := range previous {
+			if step.Status == zw.StepStatusDone {
+				executed[step.StepKey] = true
+				outputs[step.StepKey] = step.Output
+				hydrateV03ResultFromWorkflowStep(&result, step)
+			} else {
+				delete(executed, step.StepKey)
+			}
+		}
+	}
 	var runStep func(stepKey string, force bool) (string, error)
 	runStep = func(stepKey string, force bool) (string, error) {
 		if executed[stepKey] && !force {
@@ -3844,14 +3931,79 @@ func (s *Service) runV03RuntimeLifecycle(
 			return lifecycleruntime.StepResult{Status: zw.StepStatusDone, Output: "join complete"}
 		},
 	}, handler)
-	runtimeResult, err := runner.Run(ctx, s.lifecycleRuntimeState(ctx, run, result))
+	state, err := s.lifecycleRuntimeState(ctx, run, result)
+	if err != nil {
+		return err
+	}
+	if s.store != nil && run.ID != "" {
+		saved, found, err := s.store.LoadLifecycleState(ctx, run.ID)
+		if err != nil {
+			return fmt.Errorf("не удалось восстановить бюджет lifecycle: %w", err)
+		}
+		if !found && run.CurrentStep != "" {
+			if len(state.ExecutionCounts) == 0 {
+				return fmt.Errorf("нет checkpoint и достоверной истории для восстановления бюджета lifecycle")
+			}
+			for _, step := range executor.Steps() {
+				if step.Mode == lifecycler.ModeBranch || step.Mode == lifecycler.ModeParallel || step.Mode == lifecycler.ModeHumanGate {
+					return fmt.Errorf("нет checkpoint управляющих переходов: автоматическое восстановление бюджета небезопасно")
+				}
+			}
+		}
+		if found {
+			for key, count := range saved.InFlight {
+				if actual, ok := state.Results[key]; ok && actual.Status == zw.StepStatusDone && state.ExecutionCounts[key] == count {
+					if saved.Results == nil {
+						saved.Results = map[string]lifecycler.StepResult{}
+					}
+					saved.Results[key] = actual
+					delete(saved.InFlight, key)
+				}
+			}
+			state = saved
+		}
+		runner = runner.WithCheckpoint(func(state lifecycler.RuntimeState) error {
+			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := s.store.SaveLifecycleState(saveCtx, run.ID, state); err != nil {
+				return err
+			}
+			_, visible, err := s.store.LatestWorkflowPlan(saveCtx, run.ID)
+			if err != nil {
+				return err
+			}
+			for _, step := range visible {
+				if result, ok := state.Results[step.StepKey]; ok && result.Status != "" && result.Status != step.Status {
+					if err := s.store.FinishWorkflowPlanStep(saveCtx, run.ID, step.StepKey, step.AgentID, result.Status, result.Error); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
+	}
+	runtimeResult, err := runner.Run(ctx, state)
+	if run != nil {
+		run.CurrentStep = runtimeResult.CurrentStepKey
+	}
+	if err != nil {
+		return err
+	}
 	if runtimeResult.Status == zw.StatusWaitingUser {
+		if s.store != nil && run.ID != "" {
+			_ = s.store.FinishWorkflowPlan(ctx, run.ID, zw.StatusWaitingUser, runtimeResult.Reason)
+		}
 		result.NeedsClarification = true
 		result.ClarificationStep = runtimeResult.CurrentStepKey
 		result.Clarification = runtimeResult.Reason
 		return nil
 	}
 	if runtimeResult.Status == zw.StatusBlocked {
+		if s.store != nil && run.ID != "" {
+			if failure, readErr := s.store.WorkflowFailure(ctx, run.ID); readErr == nil && failure != nil && failure.Provider != nil {
+				return failure.Provider
+			}
+		}
 		return errors.New(firstNonEmpty(runtimeResult.Reason, "lifecycle runtime blocked"))
 	}
 	if err != nil {
@@ -3860,20 +4012,21 @@ func (s *Service) runV03RuntimeLifecycle(
 	return nil
 }
 
-func (s *Service) lifecycleRuntimeState(ctx context.Context, run *zw.Run, result *v03WorkflowResult) lifecycler.RuntimeState {
+func (s *Service) lifecycleRuntimeState(ctx context.Context, run *zw.Run, result *v03WorkflowResult) (lifecycler.RuntimeState, error) {
 	state := lifecycler.RuntimeState{
-		Results:    map[string]lifecycler.StepResult{},
-		Attempts:   map[string]int{},
-		Variables:  map[string]string{},
-		HumanGates: map[string]bool{},
+		ExecutionCounts: map[string]int{},
+		Results:         map[string]lifecycler.StepResult{},
+		Attempts:        map[string]int{},
+		Variables:       map[string]string{},
+		HumanGates:      map[string]bool{},
 	}
-	if run == nil || strings.TrimSpace(run.ID) == "" {
-		return state
+	if s.store == nil || run == nil || strings.TrimSpace(run.ID) == "" {
+		return state, nil
 	}
 	state.CurrentStepKey = run.CurrentStep
 	steps, err := s.store.ListWorkflowSteps(ctx, run.ID)
 	if err != nil {
-		return state
+		return state, err
 	}
 	for _, step := range steps {
 		if strings.TrimSpace(step.StepKey) == "" {
@@ -3885,15 +4038,18 @@ func (s *Service) lifecycleRuntimeState(ctx context.Context, run *zw.Run, result
 			Output:  step.Output,
 			Error:   step.Error,
 		}
-		if step.Status == zw.StepStatusFailed {
-			state.Attempts[step.StepKey]++
+		state.ExecutionCounts[step.StepKey]++
+		state.Attempts[step.StepKey] = state.ExecutionCounts[step.StepKey] - 1
+		state.TransitionCount += 2
+		if state.ExecutionCounts[step.StepKey] > 1 {
+			state.RepairCount++
 		}
 		hydrateV03ResultFromWorkflowStep(result, step)
 	}
 	if run.Status == zw.StatusWaitingUser && strings.TrimSpace(run.CurrentStep) != "" {
 		state.HumanGates[run.CurrentStep] = true
 	}
-	return state
+	return state, nil
 }
 
 func hydrateV03ResultFromWorkflowStep(result *v03WorkflowResult, step zw.Step) {
@@ -3917,14 +4073,20 @@ func hydrateV03ResultFromWorkflowStep(result *v03WorkflowResult, step zw.Step) {
 func lifecycleRuntimeStepResult(output string, err error) lifecycleruntime.StepResult {
 	status := zw.StepStatusDone
 	errText := ""
+	var terminal error
 	if err != nil {
 		status = zw.StepStatusFailed
 		errText = err.Error()
+		var providerErr *llm.ProviderError
+		if errors.As(err, &providerErr) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			terminal = err
+		}
 	}
 	return lifecycleruntime.StepResult{
-		Status: status,
-		Output: output,
-		Error:  errText,
+		TerminalError: terminal,
+		Status:        status,
+		Output:        output,
+		Error:         errText,
 	}
 }
 
@@ -4053,8 +4215,12 @@ func (s *Service) runWorkflowStepWithSpec(
 	s.setAgentRuntimeStatus(spec.ID, "thinking", stepThinkingActivity(stepKey), model.ID, runtime)
 	s.setAgentRuntimeStatus(spec.ID, "calling_model", "Отправляет шаг в "+model.Name, model.ID, runtime)
 
-	stepCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	stepCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
+	stepCtx = llm.WithRetryObserver(stepCtx, func(event llm.RetryEvent) {
+		s.setAgentRuntimeStatus(spec.ID, "calling_model", fmt.Sprintf("Повтор запроса к модели %d/%d через %.0f с", event.Attempt, event.MaxAttempts, event.Delay.Seconds()), model.ID, runtime)
+		s.emitChatState(stepCtx, projectID, "")
+	})
 
 	resp, err := provider.Generate(stepCtx, agents.RequestForSpecWithSoul(model.ModelName, spec, soul, input))
 	if resp != nil {
@@ -4143,6 +4309,7 @@ func (s *Service) AgentStatuses() []agents.Status {
 }
 
 func (s *Service) projectState(ctx context.Context, projectID string) (ProjectState, error) {
+	revision := fmt.Sprintf("%020d", time.Now().UnixNano())
 	if projectID == "" {
 		return s.unboundChatState(ctx)
 	}
@@ -4254,26 +4421,29 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 		liveProjectMemory = &memory
 	}
 	return ProjectState{
-		Project:         item,
-		Task:            task,
-		Messages:        messages,
-		ToolInvocations: toolInvocations,
-		WorkflowRun:     workflowRun,
-		WorkflowSteps:   workflowSteps,
-		WorkflowPlan:    workflowPlan,
-		PlanSteps:       planSteps,
-		Artifacts:       artifactsList,
-		Blueprint:       taskBlueprint,
-		Clarification:   clarification,
-		TaskSpec:        liveTaskSpec,
-		ProjectMemory:   liveProjectMemory,
-		Changes:         proposedChanges,
-		TestRuns:        testRuns,
-		Reviews:         reviewRuns,
-		WebSources:      webSources,
-		CTFWorkspace:    ctfWorkspace,
-		AgentGroup:      activeGroup,
-		GroupBinding:    groupBinding,
+		Project:            item,
+		ProjectionRevision: revision,
+		RequestState:       s.requestStateForTask(ctx, task),
+		WorkflowFailure:    s.failureForRun(ctx, workflowRun),
+		Task:               task,
+		Messages:           messages,
+		ToolInvocations:    toolInvocations,
+		WorkflowRun:        workflowRun,
+		WorkflowSteps:      workflowSteps,
+		WorkflowPlan:       workflowPlan,
+		PlanSteps:          planSteps,
+		Artifacts:          artifactsList,
+		Blueprint:          taskBlueprint,
+		Clarification:      clarification,
+		TaskSpec:           liveTaskSpec,
+		ProjectMemory:      liveProjectMemory,
+		Changes:            proposedChanges,
+		TestRuns:           testRuns,
+		Reviews:            reviewRuns,
+		WebSources:         webSources,
+		CTFWorkspace:       ctfWorkspace,
+		AgentGroup:         activeGroup,
+		GroupBinding:       groupBinding,
 	}, nil
 }
 
@@ -4718,10 +4888,28 @@ func (s *Service) handleModelError(ctx context.Context, projectID string, taskID
 }
 
 func (s *Service) handleWorkflowError(ctx context.Context, projectID string, taskID string, runID string, currentStep string, modelID string, err error) ChatState {
-	errorText := "Workflow остановлен: " + err.Error() + "\n\nПроверь настройки модели или уточни задачу и попробуй снова."
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	failure := store.WorkflowFailure{RunID: runID, StepKey: currentStep, Kind: "workflow_failed", Message: err.Error()}
+	var providerErr *llm.ProviderError
+	var stopErr *lifecycleruntime.StopError
+	if errors.As(err, &providerErr) {
+		copy := *providerErr
+		copy.ModelID = modelID
+		failure.Kind = providerErr.Kind
+		failure.Provider = &copy
+	}
+	if errors.As(err, &stopErr) {
+		failure.Kind = stopErr.Kind
+	}
+	s.enableSafeContinuation(ctx, projectID, taskID, runID, &failure)
+	_ = s.store.SaveWorkflowFailure(ctx, failure)
+	errorText := "Workflow остановлен: " + err.Error() + "\n\nРанее завершённые шаги сохранены."
 	_, _ = s.store.AddMessage(ctx, taskID, "agent", agents.ManagerID, errorText)
 	_ = s.store.UpdateWorkflowRun(ctx, runID, zw.StatusFailed, currentStep, err.Error())
+	_ = s.store.FinishWorkflowPlanStep(ctx, runID, currentStep, "", zw.StepStatusFailed, err.Error())
 	_ = s.store.FinishWorkflowPlan(ctx, runID, zw.StatusFailed, err.Error())
+	s.resetAgentStatuses(modelID)
 	s.setAgentStatus(agents.ManagerID, "failed", "Workflow остановлен", modelID)
 	return s.emitChatState(ctx, projectID, err.Error())
 }
@@ -5231,6 +5419,7 @@ func buildWebResearchAnswerInput(userMessage string, project project.Project, pl
 	builder.WriteString("- Если ссылка нужна в тексте рядом с важным утверждением, пиши ее строго как обычный Markdown: [название](https://example.com). Не вкладывай одну ссылку внутрь другой и не экранируй круглые скобки.\n")
 	builder.WriteString("- Не выводи сырой JSON, YAML или служебные dumps в чат.\n")
 	builder.WriteString("- Не придумывай факты, которых нет в источниках.\n")
+	builder.WriteString("- Сначала установи, что названия в источниках относятся именно к запрошенным сущностям и производителю. Совпадения короткого имени недостаточно. Предпочитай официальную документацию; проверяй дату и версию. Если название неоднозначно или источник не подтверждает ответ, запроси точное название или ссылку, не угадывай.\n")
 	return strings.TrimSpace(builder.String())
 }
 
@@ -5256,6 +5445,9 @@ func buildResearchSynthesisInput(userMessage string, project project.Project, pl
 	builder.WriteString("\n\nSource review:\n")
 	builder.WriteString(sourceReview)
 	builder.WriteString("\n\nСобери ответ для пользователя: коротко, по делу, с явным отделением фактов от выводов. Полный список источников не включай: он отображается отдельным UI-блоком.")
+	if router.NeedsCurrentSources(userMessage) {
+		builder.WriteString("\n\n" + verifiedResearchFormat)
+	}
 	return strings.TrimSpace(builder.String())
 }
 
@@ -5313,6 +5505,11 @@ func (s *Service) saveResearchNotes(ctx context.Context, currentProject project.
 }
 
 func webResearchFallbackAnswer(sources []webresearch.Source) string {
+	for _, source := range sources {
+		if source.SourceType == "weather" && strings.TrimSpace(source.ContentExcerpt) != "" {
+			return fmt.Sprintf("## %s\n\n%s\n\n[Источник: Open-Meteo](%s)", source.Title, source.ContentExcerpt, source.URL)
+		}
+	}
 	var builder strings.Builder
 	builder.WriteString("## Нашла источники\n\n")
 	builder.WriteString(fmt.Sprintf("Я собрала материалы, но модель не смогла надежно сформировать итоговый текст. Источники показаны отдельным блоком: %d.", len(sources)))
@@ -6210,6 +6407,9 @@ func deterministicBlockedFinal(result autopilotResult) string {
 }
 
 func (s *Service) buildDirectAnswerInput(ctx context.Context, project project.Project, task chat.Task, latestRun *zw.Run, userMessage string, decision router.Decision, orch orchestration.Decision) string {
+	if !decision.NeedsProjectContext {
+		return "Ответь на текущий вопрос, не выполняя действий в проекте. Пример кода оформи fenced code block с переводами строк. Не утверждай, что запускала код.\n\n" + userMessage
+	}
 	var builder strings.Builder
 	builder.WriteString("# User request\n")
 	builder.WriteString(userMessage)

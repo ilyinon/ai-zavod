@@ -16,6 +16,7 @@ import (
 )
 
 type Client struct {
+	retry   retryPolicy
 	baseURL string
 	apiKey  string
 	client  *http.Client
@@ -32,8 +33,12 @@ func NewClient(baseURL string, apiKeyRef string) *Client {
 }
 
 func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, error) {
+	return c.generateWithRetry(ctx, req)
+}
+
+func (c *Client) generateOnce(ctx context.Context, req llm.Request) (*llm.Response, error) {
 	if err := c.validate(req.Model); err != nil {
-		return nil, err
+		return nil, &llm.ProviderError{Kind: "provider_invalid_request", Cause: err}
 	}
 
 	payload := chatCompletionRequest{
@@ -51,7 +56,7 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatCompletionsURL(), bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, &llm.ProviderError{Kind: "provider_invalid_request", Cause: err}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -69,20 +74,20 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("model api вернул %s: %s", resp.Status, strings.TrimSpace(string(raw)))
+		return nil, httpFailure(resp.StatusCode, resp.Header.Get("Retry-After"))
 	}
 
 	var decoded chatCompletionResponse
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return nil, err
+		return nil, &llm.ProviderError{Kind: "provider_invalid_response", Cause: err}
 	}
 	if len(decoded.Choices) == 0 {
-		return nil, fmt.Errorf("model api не вернул choices")
+		return nil, &llm.ProviderError{Kind: "provider_invalid_response"}
 	}
 
 	content := strings.TrimSpace(decoded.Choices[0].Message.Content)
 	if content == "" && len(decoded.Choices[0].Message.ToolCalls) == 0 {
-		return nil, fmt.Errorf("model api вернул пустой ответ")
+		return nil, &llm.ProviderError{Kind: "provider_invalid_response"}
 	}
 	return &llm.Response{
 		Content:      content,
@@ -98,7 +103,7 @@ func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event,
 		return nil, fmt.Errorf("streaming tool calls are not supported; use Generate")
 	}
 	if err := c.validate(req.Model); err != nil {
-		return nil, err
+		return nil, &llm.ProviderError{Kind: "provider_invalid_request", ModelID: req.Model}
 	}
 
 	payload := chatCompletionRequest{
@@ -115,7 +120,7 @@ func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event,
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatCompletionsURL(), bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, &llm.ProviderError{Kind: "provider_invalid_request", ModelID: req.Model}
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -125,7 +130,7 @@ func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event,
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, classifyFailure(err)
 	}
 
 	events := make(chan llm.Event, 16)
@@ -134,8 +139,7 @@ func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event,
 		defer resp.Body.Close()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-			events <- llm.Event{Error: fmt.Sprintf("model api вернул %s: %s", resp.Status, strings.TrimSpace(string(raw))), Done: true}
+			events <- llm.Event{Error: httpFailure(resp.StatusCode, "").Error(), Done: true}
 			return
 		}
 
@@ -155,13 +159,23 @@ func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event,
 				}
 				event.Delta = delta
 			}
-			events <- event
+			if event.Error != "" {
+				event.Error = (&llm.ProviderError{Kind: "provider_invalid_response"}).Error()
+			}
+			select {
+			case events <- event:
+			case <-ctx.Done():
+				return
+			}
 			if event.Done || event.Error != "" {
 				return
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			events <- llm.Event{Error: err.Error(), Done: true}
+			select {
+			case events <- llm.Event{Error: classifyFailure(err).Error(), Done: true}:
+			case <-ctx.Done():
+			}
 			return
 		}
 		events <- llm.Event{Done: true}
@@ -204,18 +218,18 @@ func (c *Client) Check(ctx context.Context, modelName string) llm.ModelCheckResu
 	resp, err := c.client.Do(httpReq)
 	result.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
-		result.LastError = err.Error()
+		result.LastError = classifyFailure(err).Error()
 		return result
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	_, err = io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {
-		result.LastError = err.Error()
+		result.LastError = classifyFailure(err).Error()
 		return result
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		result.LastError = fmt.Sprintf("model api вернул %s: %s", resp.Status, strings.TrimSpace(string(raw)))
+		result.LastError = httpFailure(resp.StatusCode, "").Error()
 		return result
 	}
 

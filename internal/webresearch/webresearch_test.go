@@ -74,6 +74,14 @@ func TestWeatherLocationRussianLocative(t *testing.T) {
 	}
 }
 
+func TestWeatherLocationNizhnyNovgorod(t *testing.T) {
+	for _, query := range []string{"Какая погода в нижнем Новгороде?", "погода в Нижнем Новгороде сейчас", "погода в Нижний Новгород"} {
+		if got := weatherLocation(query); got != "Нижний Новгород" {
+			t.Fatalf("%q: location=%q", query, got)
+		}
+	}
+}
+
 func TestWeatherLocationEnglish(t *testing.T) {
 	location := weatherLocation("weather in Minsk today")
 	if location != "Minsk" {

@@ -1,5 +1,14 @@
 package chat
 
+type RequestState struct {
+	ID            string `json:"id"`
+	Sequence      int    `json:"sequence"`
+	Mode          string `json:"mode"`
+	Original      string `json:"original"`
+	Question      string `json:"question,omitempty"`
+	WorkflowRunID string `json:"workflowRunId,omitempty"`
+}
+
 type Task struct {
 	GroupID        string `json:"groupId"`
 	ModelID        string `json:"modelId"`

@@ -30,7 +30,7 @@ type Context struct {
 }
 
 func Route(message string, context Context) Decision {
-	text := normalize(message)
+	text := normalize(instructionText(message))
 	if text == "" {
 		return Decision{Intent: IntentGeneralChat, Confidence: "high", Reason: "пустое сообщение", Source: "rules"}
 	}
@@ -44,15 +44,14 @@ func Route(message string, context Context) Decision {
 			Source:              "rules",
 		}
 	}
-	if context.HasActiveClarification && !hasCodingVerb(text) && !hasDirectQuestionMarker(text) {
-		return Decision{
-			Intent:              IntentClarificationAnswer,
-			Confidence:          "medium",
-			Reason:              "есть активное уточнение, сообщение похоже на ответ",
-			NeedsProjectContext: true,
-			NeedsWorkflow:       true,
-			Source:              "rules",
-		}
+	if (hasResearchMarker(text) || hasWeatherLookup(text)) && !hasCodingVerb(text) {
+		return Decision{Intent: IntentResearchTask, Confidence: "high", Reason: "запрос требует внешних источников или актуальных погодных данных", NeedsProjectContext: likelyNeedsProjectContext(text), NeedsWorkflow: true, Source: "rules"}
+	}
+	if NeedsCurrentSources(message) {
+		return Decision{Intent: IntentResearchTask, Confidence: "high", Reason: "характеристики и сравнения продуктов требуют проверки по источникам", NeedsWorkflow: true, Source: "rules"}
+	}
+	if explanationRequest(text) {
+		return Decision{Intent: IntentDirectAnswer, Confidence: "high", Reason: "объяснение или пример в чате, без поручения изменить проект", NeedsProjectContext: likelyNeedsProjectContext(text), Source: "rules"}
 	}
 	if hasWorkflowControlMarker(text) {
 		return Decision{
@@ -69,16 +68,6 @@ func Route(message string, context Context) Decision {
 			Confidence:          "high",
 			Reason:              "запрос относится к безопасности или пентесту",
 			NeedsProjectContext: true,
-			NeedsWorkflow:       true,
-			Source:              "rules",
-		}
-	}
-	if hasResearchMarker(text) && !hasCodingVerb(text) {
-		return Decision{
-			Intent:              IntentResearchTask,
-			Confidence:          "high",
-			Reason:              "пользователь просит найти или проверить информацию в интернете",
-			NeedsProjectContext: likelyNeedsProjectContext(text),
 			NeedsWorkflow:       true,
 			Source:              "rules",
 		}
@@ -124,6 +113,7 @@ func Route(message string, context Context) Decision {
 		Confidence:          "low",
 		Reason:              "не удалось уверенно классифицировать локальными правилами",
 		NeedsProjectContext: true,
+		NeedsClarification:  true,
 		Source:              "rules",
 	}
 }
@@ -133,11 +123,11 @@ func normalize(value string) string {
 }
 
 func hasCodingVerb(text string) bool {
-	return containsAny(text,
+	return politeAction.MatchString(text) || containsAny(text,
 		"реализуй", "исправь", "почини", "добавь", "измени", "создай", "удали", "перепиши",
 		"собери", "внедри", "сгенерируй файл", "сделай чтобы", "сделай так", "поправь",
 		"замени", "перенеси", "обнови код", "доработай", "переименуй", "отрефактори",
-		"напиши", "написать", "сделай", "сгенерируй код", "сгенерируй скрипт",
+		"напиши", "сделай", "сгенерируй код", "сгенерируй скрипт",
 		"сгенерируй программу", "создай скрипт", "создай программу",
 	)
 }
