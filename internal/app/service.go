@@ -38,6 +38,7 @@ import (
 	"zavod_ai/internal/router"
 	"zavod_ai/internal/store"
 	"zavod_ai/internal/taskspec"
+	"zavod_ai/internal/toolruntime"
 	"zavod_ai/internal/webresearch"
 	zw "zavod_ai/internal/workflow"
 )
@@ -87,25 +88,26 @@ type BootstrapState struct {
 }
 
 type ProjectState struct {
-	Project       ProjectDTO              `json:"project"`
-	Task          *TaskDTO                `json:"task,omitempty"`
-	Messages      []MessageDTO            `json:"messages"`
-	WorkflowRun   *WorkflowRunDTO         `json:"workflowRun,omitempty"`
-	WorkflowSteps []WorkflowStepDTO       `json:"workflowSteps"`
-	WorkflowPlan  *WorkflowPlanDTO        `json:"workflowPlan,omitempty"`
-	PlanSteps     []WorkflowPlanStepDTO   `json:"planSteps"`
-	Artifacts     []ArtifactDTO           `json:"artifacts"`
-	Blueprint     *BlueprintDTO           `json:"blueprint,omitempty"`
-	Clarification *ClarificationDTO       `json:"clarification,omitempty"`
-	TaskSpec      *TaskSpecDTO            `json:"taskSpec,omitempty"`
-	ProjectMemory *ProjectMemoryDTO       `json:"projectMemory,omitempty"`
-	Changes       []ProposedChangeDTO     `json:"changes"`
-	TestRuns      []TestRunDTO            `json:"testRuns"`
-	Reviews       []ReviewRunDTO          `json:"reviews"`
-	WebSources    []WebSourceDTO          `json:"webSources"`
-	CTFWorkspace  *CTFWorkspaceDTO        `json:"ctfWorkspace,omitempty"`
-	AgentGroup    *AgentGroupDTO          `json:"agentGroup,omitempty"`
-	GroupBinding  *ProjectGroupBindingDTO `json:"groupBinding,omitempty"`
+	ToolInvocations []toolruntime.Invocation `json:"toolInvocations"`
+	Project         ProjectDTO               `json:"project"`
+	Task            *TaskDTO                 `json:"task,omitempty"`
+	Messages        []MessageDTO             `json:"messages"`
+	WorkflowRun     *WorkflowRunDTO          `json:"workflowRun,omitempty"`
+	WorkflowSteps   []WorkflowStepDTO        `json:"workflowSteps"`
+	WorkflowPlan    *WorkflowPlanDTO         `json:"workflowPlan,omitempty"`
+	PlanSteps       []WorkflowPlanStepDTO    `json:"planSteps"`
+	Artifacts       []ArtifactDTO            `json:"artifacts"`
+	Blueprint       *BlueprintDTO            `json:"blueprint,omitempty"`
+	Clarification   *ClarificationDTO        `json:"clarification,omitempty"`
+	TaskSpec        *TaskSpecDTO             `json:"taskSpec,omitempty"`
+	ProjectMemory   *ProjectMemoryDTO        `json:"projectMemory,omitempty"`
+	Changes         []ProposedChangeDTO      `json:"changes"`
+	TestRuns        []TestRunDTO             `json:"testRuns"`
+	Reviews         []ReviewRunDTO           `json:"reviews"`
+	WebSources      []WebSourceDTO           `json:"webSources"`
+	CTFWorkspace    *CTFWorkspaceDTO         `json:"ctfWorkspace,omitempty"`
+	AgentGroup      *AgentGroupDTO           `json:"agentGroup,omitempty"`
+	GroupBinding    *ProjectGroupBindingDTO  `json:"groupBinding,omitempty"`
 }
 
 type ChatState struct {
@@ -155,9 +157,10 @@ type DeleteProjectInput struct {
 }
 
 type SendMessageInput struct {
-	TaskID    string `json:"taskId"`
-	ProjectID string `json:"projectId"`
-	Content   string `json:"content"`
+	ToolConsentModelID string `json:"toolConsentModelId"`
+	TaskID             string `json:"taskId"`
+	ProjectID          string `json:"projectId"`
+	Content            string `json:"content"`
 }
 
 type SubmitClarificationInput struct {
@@ -736,7 +739,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Chat
 		return s.emitChatState(ctx, "", ""), nil
 	}
 	if !orch.NeedsWorkflow {
-		return s.answerDirect(ctx, currentProject, *task, latestRun, provider, model, content, decision, orch)
+		return s.answerDirect(ctx, currentProject, *task, latestRun, provider, model, content, decision, orch, input.ToolConsentModelID)
 	}
 	ctx = s.chatGroupContext(ctx, *task, orch.GroupID)
 	useCTFWorkflow := decision.Intent == router.IntentPentestTask && s.shouldUseCTFWorkflow(ctx, input.ProjectID, content)
@@ -902,6 +905,7 @@ func (s *Service) answerDirect(
 	content string,
 	decision router.Decision,
 	orch orchestration.Decision,
+	consentModelID string,
 ) (ChatState, error) {
 	s.setAgentStatus(agents.ManagerID, "answering", directAnswerActivity(decision.Intent), model.ID)
 	s.emitChatState(ctx, currentProject.ID, "")
@@ -927,9 +931,9 @@ func (s *Service) answerDirect(
 		return s.emitChatState(ctx, currentProject.ID, ""), nil
 	}
 
-	answerCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	answerCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
-	resp, err := provider.Generate(answerCtx, llm.Request{
+	req := llm.Request{
 		Model: model.ModelName,
 		Messages: []llm.Message{
 			{
@@ -951,7 +955,14 @@ func (s *Service) answerDirect(
 		},
 		Temperature: 0.2,
 		MaxTokens:   1200,
-	})
+	}
+	var resp *llm.Response
+	var err error
+	if currentProject.ID != "" && decision.Intent == router.IntentProjectAnalysis {
+		resp, err = s.generateProjectAnswer(answerCtx, currentProject, task.ID, provider, model, req, consentModelID)
+	} else {
+		resp, err = provider.Generate(answerCtx, req)
+	}
 	if err != nil {
 		s.setAgentStatus(agents.ManagerID, "failed", "Не смогла ответить напрямую", model.ID)
 		return s.emitChatState(ctx, currentProject.ID, "Люмен не смогла ответить напрямую: "+err.Error()), nil
@@ -4144,6 +4155,7 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 		return ProjectState{}, err
 	}
 	messages := []chat.Message{}
+	toolInvocations := []toolruntime.Invocation{}
 	var workflowRun *zw.Run
 	workflowSteps := []zw.Step{}
 	var workflowPlan *zw.Plan
@@ -4175,6 +4187,10 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 	activeGroup = &group
 	if task != nil {
 		messages, err = s.store.ListMessages(ctx, task.ID)
+		if err != nil {
+			return ProjectState{}, err
+		}
+		toolInvocations, err = s.store.ListToolInvocations(ctx, task.ID)
 		if err != nil {
 			return ProjectState{}, err
 		}
@@ -4238,25 +4254,26 @@ func (s *Service) projectState(ctx context.Context, projectID string) (ProjectSt
 		liveProjectMemory = &memory
 	}
 	return ProjectState{
-		Project:       item,
-		Task:          task,
-		Messages:      messages,
-		WorkflowRun:   workflowRun,
-		WorkflowSteps: workflowSteps,
-		WorkflowPlan:  workflowPlan,
-		PlanSteps:     planSteps,
-		Artifacts:     artifactsList,
-		Blueprint:     taskBlueprint,
-		Clarification: clarification,
-		TaskSpec:      liveTaskSpec,
-		ProjectMemory: liveProjectMemory,
-		Changes:       proposedChanges,
-		TestRuns:      testRuns,
-		Reviews:       reviewRuns,
-		WebSources:    webSources,
-		CTFWorkspace:  ctfWorkspace,
-		AgentGroup:    activeGroup,
-		GroupBinding:  groupBinding,
+		Project:         item,
+		Task:            task,
+		Messages:        messages,
+		ToolInvocations: toolInvocations,
+		WorkflowRun:     workflowRun,
+		WorkflowSteps:   workflowSteps,
+		WorkflowPlan:    workflowPlan,
+		PlanSteps:       planSteps,
+		Artifacts:       artifactsList,
+		Blueprint:       taskBlueprint,
+		Clarification:   clarification,
+		TaskSpec:        liveTaskSpec,
+		ProjectMemory:   liveProjectMemory,
+		Changes:         proposedChanges,
+		TestRuns:        testRuns,
+		Reviews:         reviewRuns,
+		WebSources:      webSources,
+		CTFWorkspace:    ctfWorkspace,
+		AgentGroup:      activeGroup,
+		GroupBinding:    groupBinding,
 	}, nil
 }
 

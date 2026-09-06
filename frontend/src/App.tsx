@@ -1,6 +1,8 @@
 import { FormEvent, KeyboardEvent, MouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, X, ArrowUp, Plus } from 'lucide-react';
 import { ChatSidebar } from './ChatSidebar';
+import { ToolActivity } from './ToolActivity';
+import type { ToolInvocation } from './lib/backend';
 import {
   AgentGroup,
   AgentGroupTemplate,
@@ -223,6 +225,8 @@ function App() {
   const [clarification, setClarification] = useState<PendingClarification | null>(null);
   const [changes, setChanges] = useState<ProposedChange[]>([]);
   const [webSources, setWebSources] = useState<WebSource[]>([]);
+  const [toolInvocations, setToolInvocations] = useState<ToolInvocation[]>([]);
+  const [toolConsent, setToolConsent] = useState('');
   const [ctfWorkspace, setCTFWorkspace] = useState<CTFWorkspace | null>(null);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [agentGroups, setAgentGroups] = useState<AgentGroup[]>([]);
@@ -239,6 +243,9 @@ function App() {
   const [lifecycleForm, setLifecycleForm] = useState<LifecycleDefinition | null>(null);
   const [lifecycleStepForm, setLifecycleStepForm] = useState<LifecycleStep | null>(null);
   const [models, setModels] = useState<ModelConfig[]>([]);
+  const toolModel = models.find(model => currentTask?.modelId ? model.id === currentTask.modelId : model.isActive);
+  const toolConsentKey = JSON.stringify([currentTask?.id, selectedProjectId, toolModel?.id, toolModel?.baseUrl]);
+  useEffect(() => setToolConsent(''), [toolConsentKey]);
   const [activeModelId, setActiveModelId] = useState('');
   const [webSettings, setWebSettings] = useState<WebSettings>(defaultWebSettings);
   const [savingWebSettings, setSavingWebSettings] = useState(false);
@@ -450,6 +457,7 @@ function App() {
     setClarification(state.clarification ?? null);
     setChanges(state.changes ?? []);
     setWebSources(state.webSources ?? []);
+    setToolInvocations((state.toolInvocations ?? []).filter(item => item.taskId === state.task?.id));
     setCTFWorkspace(state.ctfWorkspace ?? null);
     setCurrentAgentGroup(state.agentGroup ?? null);
     setGroupBinding(state.groupBinding ?? null);
@@ -636,9 +644,11 @@ function App() {
   }
 
   async function sendChatRequest(task: Task, content: string) {
+    const consentModelId = toolConsent === toolConsentKey ? toolModel?.id || '' : '';
+    setToolConsent('');
     setChatActivity(previous => ({ ...previous, [task.id]: 'running' }));
     try {
-      const state = await backend.sendMessage(task.projectId, content, task.id);
+      const state = await backend.sendMessage(task.projectId, content, task.id, consentModelId);
       if (state.task) setChats(previous => upsertChat(previous, state.task!));
       if (selectedChatRef.current === task.id) { applyChatState(state); setAgents(state.agents); if (state.error) setError(state.error); }
     } finally { setChatActivity(previous => ({ ...previous, [task.id]: 'idle' })); }
@@ -1410,7 +1420,7 @@ function App() {
           </form>
         )}
 
-        {(visibleChanges.length > 0 || visibleWebSources.length > 0 || planSteps.length > 0) && (
+        {(visibleChanges.length > 0 || visibleWebSources.length > 0 || planSteps.length > 0 || toolInvocations.length > 0) && (
           <div className="dock-row" aria-label="Сводка выполнения">
             {visibleChanges.length > 0 && (
               <ChangeSummaryDock
@@ -1435,10 +1445,15 @@ function App() {
               />
             )}
             {planSteps.length > 0 && <StepDock plan={workflowPlan} steps={planSteps} />}
+            <ToolActivity key={currentTask?.id} items={toolInvocations} />
           </div>
         )}
 
         <form className="composer" onSubmit={handleSendMessage}>
+          {selectedProjectId && toolModel && <label className="tool-consent">
+            <input type="checkbox" checked={toolConsent === toolConsentKey} disabled={sending} onChange={event => setToolConsent(event.target.checked ? toolConsentKey : '')} />
+            <span>Разрешить диагностику для этого запроса: чтение файлов и запуск проверок. Файлы и логи получит {toolModel.name} ({toolModel.baseUrl}). Проверки выполняют код проекта и могут менять окружение.</span>
+          </label>}
           {currentTask?.pendingRequest && <div className="workspace-request">
             <span>Для выполнения задачи нужна рабочая папка.</span>
             <div className="workspace-request-actions">

@@ -184,6 +184,7 @@ func runResolved(ctx context.Context, projectPath string, command string, workin
 	}
 
 	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
+	configureCheckProcess(cmd)
 	cmd.Dir = workDir
 
 	var stdout limitedBuffer
@@ -205,7 +206,7 @@ func runResolved(ctx context.Context, projectPath string, command string, workin
 	result.Status = StatusFailed
 	result.ExitCode = 1
 	if runCtx.Err() != nil {
-		result.Error = "команда остановлена по timeout 180 секунд"
+		result.Error = "команда остановлена: " + runCtx.Err().Error()
 		result.ExitCode = -1
 		return result
 	}
@@ -234,6 +235,7 @@ func preparePythonVirtualenv(ctx context.Context, workDir string, args []string)
 			return nil, stdout.String(), stderr.String(), err
 		}
 		cmd := exec.CommandContext(ctx, "python3", "-m", "venv", ".venv")
+		configureCheckProcess(cmd)
 		cmd.Dir = workDir
 		cmd.Env = append(os.Environ(), "PYTHONNOUSERSITE=1")
 		out, errOut, err := runPrepCommand(cmd)
@@ -247,6 +249,7 @@ func preparePythonVirtualenv(ctx context.Context, workDir string, args []string)
 	requirementsPath := filepath.Join(workDir, "requirements.txt")
 	if _, err := os.Stat(requirementsPath); err == nil {
 		cmd := exec.CommandContext(ctx, venvPython, "-m", "pip", "install", "-r", "requirements.txt")
+		configureCheckProcess(cmd)
 		cmd.Dir = workDir
 		cmd.Env = append(os.Environ(), "PYTHONNOUSERSITE=1")
 		out, errOut, err := runPrepCommand(cmd)

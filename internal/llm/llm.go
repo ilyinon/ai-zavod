@@ -3,8 +3,32 @@ package llm
 import "context"
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function FunctionCall `json:"function"`
+}
+
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type Tool struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 type Request struct {
@@ -12,13 +36,15 @@ type Request struct {
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
 	MaxTokens   int       `json:"maxTokens"`
+	Tools       []Tool    `json:"tools,omitempty"`
 }
 
 type Response struct {
-	Content      string `json:"content"`
-	InputTokens  int    `json:"inputTokens"`
-	OutputTokens int    `json:"outputTokens"`
-	TotalTokens  int    `json:"totalTokens"`
+	Content      string     `json:"content"`
+	InputTokens  int        `json:"inputTokens"`
+	OutputTokens int        `json:"outputTokens"`
+	TotalTokens  int        `json:"totalTokens"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type Event struct {

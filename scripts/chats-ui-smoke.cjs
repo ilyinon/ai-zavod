@@ -12,10 +12,11 @@ const assert = require('node:assert/strict');
       const projects = [{ id: 'p', name: 'Telegram-бот', path: '/tmp/bot', createdAt: '', lastOpenedAt: '' }];
       const chats = [{ id: 'old', projectId: 'p', title: 'Архитектура', status: 'active', pinned: false, createdAt: '', updatedAt: '', groupId: '', modelId: '' }];
       const messages = { old: [{ id: 'm0', taskId: 'old', role: 'agent', agentId: 'manager', content: 'Существующая архитектура проекта', createdAt: '' }] };
-      const model = { id: 'm', name: 'Qwen по сети', modelName: 'qwen3:coder', provider: 'openai-compatible', isActive: true, status: 'online', latencyMs: 12 };
+      const model = { id: 'm', name: 'Qwen по сети', baseUrl: 'http://127.0.0.1:1234/v1', modelName: 'qwen3:coder', provider: 'openai-compatible', isActive: true, status: 'online', latencyMs: 12 };
+      const toolInvocations = [{ id: 'tool1', loopId: 'loop', callId: 'call', projectId: 'p', taskId: 'old', agentId: 'agent_dev_developer', agentName: 'Разработчик', workingDir: '/tmp/bot', toolProfileId: 'tool_go_dev', tool: 'run_check', arguments: '{"command":"go test ./..."}', result: { status: 'failed', output: '--- FAIL: TestBroken (0.00s)\n    broken_test.go:3: fixture diagnostic failure\nFAIL', exitCode: 1, truncated: false }, startedAt: '2026-09-06T12:00:00Z', finishedAt: '2026-09-06T12:00:02Z' }];
       const listeners = {};
       const emit = (event, data) => (listeners[event] || []).forEach(fn => fn(structuredClone(data)));
-      const state = id => ({ project: projects.find(p => p.id === chats.find(t => t.id === id)?.projectId) || {}, task: chats.find(t => t.id === id), messages: messages[id] || [], workflowSteps: [], planSteps: [], artifacts: [], changes: [], testRuns: [], reviews: [], webSources: [], agents: [] });
+      const state = id => ({ project: projects.find(p => p.id === chats.find(t => t.id === id)?.projectId) || {}, task: chats.find(t => t.id === id), messages: messages[id] || [], toolInvocations: toolInvocations.filter(item => item.taskId === id), workflowSteps: [], planSteps: [], artifacts: [], changes: [], testRuns: [], reviews: [], webSources: [], agents: [] });
       window.__emit = emit;
       window.runtime = { EventsOn: (event, fn) => { (listeners[event] ||= []).push(fn); return () => { listeners[event] = listeners[event].filter(f => f !== fn); }; } };
       window.go = { main: { App: {
@@ -28,7 +29,8 @@ const assert = require('node:assert/strict');
         CreateProject: async ({ name }) => { const p = { id: 'p' + projects.length, name, path: '/tmp/' + name }; projects.push(p); return p; },
         AddExistingProject: async ({ name, path }) => { const p = { id: 'p' + projects.length, name, path }; projects.push(p); return p; },
         ChooseProjectFolder: async () => '/tmp/existing',
-        SendMessage: async ({ taskId, content }) => {
+        SendMessage: async ({ taskId, content, toolConsentModelId }) => {
+          window.__lastToolConsent = toolConsentModelId;
           const task = chats.find(t => t.id === taskId);
           task.title = content.slice(0, 45);
           messages[taskId] ||= [];
@@ -49,14 +51,39 @@ const assert = require('node:assert/strict');
     await composer.fill('Сохранённый черновик');
     await page.getByRole('button', { name: 'Архитектура', exact: true }).click();
     await page.getByText('Существующая архитектура проекта', { exact: true }).waitFor();
+    const toolButton = page.getByRole('button', { name: 'Инструменты · 1', exact: true });
+    await toolButton.hover();
+    await page.getByRole('region', { name: 'Вызовы инструментов' }).waitFor();
+    await page.locator('.tool-invocation > summary').click();
+    await page.getByText('Код завершения: 1', { exact: true }).waitFor();
+    await page.screenshot({ path: '/tmp/zavod-tools-desktop.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await toolButton.click();
+    await page.screenshot({ path: '/tmp/zavod-tools-mobile.png' });
+    const panel = await page.locator('.tool-activity-popover').boundingBox();
+    assert.ok(panel.x >= 0 && panel.x + panel.width <= 390 && panel.y >= 0, 'tool popover outside mobile viewport');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'tool UI overflow');
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const consent = page.getByRole('checkbox', { name: /Разрешить диагностику/ });
+    assert.equal(await consent.isChecked(), false, 'tool permission default must be off');
+    await consent.check();
     assert.equal(await page.getByText('Ответ Люмен', { exact: true }).count(), 0);
     await page.evaluate(() => window.__emit('chat_state_changed', { task: { id: 'other', title: 'Background', projectId: '' }, messages: [{ id: 'leak', role: 'agent', content: 'WRONG CHAT' }], agents: [] }));
     assert.equal(await page.getByText('WRONG CHAT', { exact: true }).count(), 0);
     await page.getByRole('button', { name: 'Привет', exact: true }).click();
+    assert.equal(await page.getByRole('button', { name: 'Инструменты · 1', exact: true }).count(), 0, 'tool log leaked across chats');
     assert.equal(await composer.inputValue(), 'Сохранённый черновик');
     await page.getByRole('button', { name: 'Новый чат в Telegram-бот' }).click();
     assert.equal(await page.getByLabel('Проект чата', { exact: true }).inputValue(), 'p');
     assert.equal(await page.getByText('Ответ Люмен', { exact: true }).count(), 0);
+    assert.equal(await page.getByRole('checkbox', { name: /Разрешить диагностику/ }).isChecked(), false, 'consent leaked across chats');
+    await page.getByRole('checkbox', { name: /Разрешить диагностику/ }).check();
+    await composer.fill('Разберись, почему падают тесты');
+    await page.getByRole('button', { name: 'Отправить', exact: true }).click();
+    await page.getByText('Ответ Люмен', { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__lastToolConsent), 'm', 'consent not bound to selected model');
+    assert.equal(await page.getByRole('checkbox', { name: /Разрешить диагностику/ }).isChecked(), false, 'consent was not consumed');
     await page.getByRole('button', { name: 'Новый чат', exact: true }).first().click();
     await composer.fill('Напиши скрипт на Go');
     await page.getByRole('button', { name: 'Отправить', exact: true }).click();
@@ -78,6 +105,6 @@ const assert = require('node:assert/strict');
     await page.screenshot({ path: '/tmp/zavod-chats-mobile.png' });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'horizontal page overflow');
     assert.equal(errors.length, 0, errors.join('\n'));
-    console.log('PASS: new chats, project chats, isolated events, drafts, workspace gate, folder picker, rename, archive, mobile layout');
+    console.log('PASS: chats, isolated events and tool logs, tool popover, one-request model consent, drafts, workspace gate, rename, archive, desktop/mobile layout');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -166,6 +166,10 @@ func (s *Service) unboundChatState(ctx context.Context) (ProjectState, error) {
 	state := ProjectState{Task: task, Messages: []MessageDTO{}}
 	if task != nil {
 		state.Messages, err = s.store.ListMessages(ctx, task.ID)
+		if err != nil {
+			return state, err
+		}
+		state.ToolInvocations, err = s.store.ListToolInvocations(ctx, task.ID)
 		state.WebSources, _ = s.store.ChatSources(ctx, task.ID)
 	}
 	return state, err

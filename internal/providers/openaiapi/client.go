@@ -39,6 +39,7 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 	payload := chatCompletionRequest{
 		Model:       req.Model,
 		Messages:    toAPIMessage(req.Messages),
+		Tools:       req.Tools,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 		Stream:      false,
@@ -80,11 +81,12 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 	}
 
 	content := strings.TrimSpace(decoded.Choices[0].Message.Content)
-	if content == "" {
+	if content == "" && len(decoded.Choices[0].Message.ToolCalls) == 0 {
 		return nil, fmt.Errorf("model api вернул пустой ответ")
 	}
 	return &llm.Response{
 		Content:      content,
+		ToolCalls:    decoded.Choices[0].Message.ToolCalls,
 		InputTokens:  decoded.Usage.PromptTokens,
 		OutputTokens: decoded.Usage.CompletionTokens,
 		TotalTokens:  decoded.Usage.TotalTokens,
@@ -92,6 +94,9 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 }
 
 func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event, error) {
+	if len(req.Tools) > 0 {
+		return nil, fmt.Errorf("streaming tool calls are not supported; use Generate")
+	}
 	if err := c.validate(req.Model); err != nil {
 		return nil, err
 	}
@@ -167,7 +172,7 @@ func (c *Client) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event,
 func (c *Client) Capabilities() llm.Capabilities {
 	return llm.Capabilities{
 		Streaming: true,
-		Tools:     false,
+		Tools:     true,
 	}
 }
 
@@ -273,14 +278,17 @@ func toAPIMessage(messages []llm.Message) []apiMessage {
 			role = "user"
 		}
 		out = append(out, apiMessage{
-			Role:    role,
-			Content: message.Content,
+			Role:       role,
+			Content:    message.Content,
+			ToolCalls:  message.ToolCalls,
+			ToolCallID: message.ToolCallID,
 		})
 	}
 	return out
 }
 
 type chatCompletionRequest struct {
+	Tools       []llm.Tool   `json:"tools,omitempty"`
 	Model       string       `json:"model"`
 	Messages    []apiMessage `json:"messages"`
 	Temperature float64      `json:"temperature,omitempty"`
@@ -289,8 +297,10 @@ type chatCompletionRequest struct {
 }
 
 type apiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	ToolCalls  []llm.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content"`
 }
 
 type chatCompletionResponse struct {

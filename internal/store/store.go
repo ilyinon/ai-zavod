@@ -491,6 +491,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateChats(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateToolRuns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "tasks", "group_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
